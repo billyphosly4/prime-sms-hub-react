@@ -1,6 +1,6 @@
 // dashboard.jsx
 import React, { useState, useEffect } from 'react';
-import { auth, db } from '/src/firebasejs/config';
+import { auth, db } from '../firebasejs/config';
 import { signOut } from 'firebase/auth';
 import {
   doc, getDoc, setDoc, updateDoc,
@@ -10,11 +10,11 @@ import {
 import axios from 'axios';
 import './Dashboard.css';
 
-// API Keys from environment variables with fallbacks
+// API Keys from environment variables
 const PAYSTACK_PUBLIC_KEY = import.meta.env.VITE_PAYSTACK_PUBLIC_KEY || 'pk_live_639470fbe710a9b3503068dd875e4b027bd096fe';
 const TELEGRAM_BOT_TOKEN = import.meta.env.VITE_TELEGRAM_BOT_TOKEN;
 const FIVESIM_API_KEY = import.meta.env.VITE_5SIM_API_KEY;
-const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'https://smshub-ftgg.onrender.com';
+const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:5000';
 const APP_NAME = import.meta.env.VITE_APP_NAME || 'PrimeSmsHub';
 
 const Dashboard = ({ onNavigate, user }) => {
@@ -232,31 +232,23 @@ const Dashboard = ({ onNavigate, user }) => {
 
     try {
       // Try to fetch from backend
-      try {
-        const response = await axios.get(`${BACKEND_URL}/api/5sim/countries`, {
-          headers: { 
-            'Authorization': `Bearer ${FIVESIM_API_KEY}`,
-            'Content-Type': 'application/json'
-          },
-          timeout: 5000
-        });
-        
-        if (response.data && typeof response.data === 'object') {
-          const countryList = Object.keys(response.data).map(key => ({
-            code: key,
-            name: response.data[key].name || key.toUpperCase(),
-            image: response.data[key].image || getCountryFlag(key)
-          }));
-          setCountries(countryList);
-        } else {
-          setCountries(mockCountries);
-        }
-      } catch (backendError) {
-        console.warn('Backend not available, using mock data');
+      const response = await axios.get(`${BACKEND_URL}/api/5sim/countries`, {
+        timeout: 5000,
+        headers: { 'Accept': 'application/json' }
+      });
+      
+      if (response.data && typeof response.data === 'object') {
+        const countryList = Object.keys(response.data).map(key => ({
+          code: key,
+          name: response.data[key].name || key.toUpperCase(),
+          image: response.data[key].image || getCountryFlag(key)
+        }));
+        setCountries(countryList);
+      } else {
         setCountries(mockCountries);
       }
     } catch (error) {
-      console.error('Error loading countries:', error);
+      console.warn('Backend not available, using mock data');
       setCountries(mockCountries);
     } finally {
       setLoading(false);
@@ -275,40 +267,34 @@ const Dashboard = ({ onNavigate, user }) => {
     
     // Mock services data
     const mockServices = [
-      { id: 'whatsapp', name: 'WhatsApp', price: 1.99, operators: ['MTS', 'Beeline', 'Megafon'] },
-      { id: 'telegram', name: 'Telegram', price: 1.49, operators: ['MTS', 'Beeline', 'Tele2'] },
-      { id: 'viber', name: 'Viber', price: 1.29, operators: ['Megafon', 'Tele2'] },
-      { id: 'facebook', name: 'Facebook', price: 1.89, operators: ['MTS', 'Beeline', 'Megafon', 'Tele2'] },
-      { id: 'google', name: 'Google', price: 1.59, operators: ['MTS', 'Beeline'] },
-      { id: 'instagram', name: 'Instagram', price: 1.79, operators: ['Megafon', 'Tele2'] },
-      { id: 'twitter', name: 'Twitter', price: 1.39, operators: ['MTS', 'Beeline'] },
-      { id: 'tiktok', name: 'TikTok', price: 1.69, operators: ['Megafon', 'Tele2'] }
+      { id: 'whatsapp', name: 'WhatsApp', price: 1.99 },
+      { id: 'telegram', name: 'Telegram', price: 1.49 },
+      { id: 'viber', name: 'Viber', price: 1.29 },
+      { id: 'facebook', name: 'Facebook', price: 1.89 },
+      { id: 'google', name: 'Google', price: 1.59 },
+      { id: 'instagram', name: 'Instagram', price: 1.79 },
+      { id: 'twitter', name: 'Twitter', price: 1.39 },
+      { id: 'tiktok', name: 'TikTok', price: 1.69 }
     ];
 
     try {
-      try {
-        const response = await axios.get(`${BACKEND_URL}/api/5sim/services?country=${countryCode}`, {
-          headers: { 'Authorization': `Bearer ${FIVESIM_API_KEY}` },
-          timeout: 5000
-        });
-        
-        if (response.data && response.data.services) {
-          setServices(response.data.services);
-          setOperators(response.data.operators || []);
-          setServicePrices(response.data.prices || {});
-        } else {
-          setServices(mockServices);
-          setOperators(['MTS', 'Beeline', 'Megafon', 'Tele2']);
-        }
-      } catch (error) {
-        console.warn('Using mock service data');
+      const response = await axios.get(`${BACKEND_URL}/api/5sim/services?country=${countryCode}`, {
+        timeout: 5000,
+        headers: { 'Accept': 'application/json' }
+      });
+      
+      if (response.data && response.data.services) {
+        setServices(response.data.services);
+        setOperators(response.data.operators || []);
+        setServicePrices(response.data.prices || {});
+      } else {
         setServices(mockServices);
-        setOperators(['MTS', 'Beeline', 'Megafon', 'Tele2']);
+        setOperators(['MTS', 'Beeline', 'Megafon', 'Tele2', 'Safaricom', 'Airtel', 'MTN', 'Glo']);
       }
     } catch (error) {
-      console.error('Error loading services:', error);
+      console.warn('Using mock service data');
       setServices(mockServices);
-      setOperators(['MTS', 'Beeline', 'Megafon', 'Tele2']);
+      setOperators(['MTS', 'Beeline', 'Megafon', 'Tele2', 'Safaricom', 'Airtel', 'MTN', 'Glo']);
     } finally {
       setLoading(false);
     }
@@ -392,13 +378,23 @@ const Dashboard = ({ onNavigate, user }) => {
       alert('Please enter your phone number');
       return;
     }
+    if (!currentUser?.email) {
+      alert('User email not found');
+      return;
+    }
 
+    // Check if Paystack is loaded
     if (!window.PaystackPop) {
-      alert('Payment system loading. Please try again in a moment.');
+      alert('Loading payment system...');
+      
       const script = document.createElement('script');
       script.src = 'https://js.paystack.co/v1/inline.js';
+      script.async = true;
       script.onload = () => {
         setTimeout(() => handlePaystackPayment(), 500);
+      };
+      script.onerror = () => {
+        alert('Failed to load payment system. Please refresh the page.');
       };
       document.body.appendChild(script);
       return;
@@ -406,31 +402,37 @@ const Dashboard = ({ onNavigate, user }) => {
 
     setPaymentLoading(true);
 
-    const handler = window.PaystackPop.setup({
-      key: PAYSTACK_PUBLIC_KEY,
-      email: currentUser.email,
-      amount: parseFloat(amount) * 100,
-      currency: currency,
-      ref: 'PSH-' + Math.floor(Math.random() * 1000000000) + 1,
-      metadata: {
-        custom_fields: [
-          {
-            display_name: "Phone Number",
-            variable_name: "phone_number",
-            value: phoneNumber
-          }
-        ]
-      },
-      callback: async (response) => {
-        await verifyPayment(response.reference, parseFloat(amount), currency);
-        setPaymentLoading(false);
-      },
-      onClose: () => {
-        setPaymentLoading(false);
-        alert('Payment window closed');
-      }
-    });
-    handler.openIframe();
+    try {
+      const handler = window.PaystackPop.setup({
+        key: PAYSTACK_PUBLIC_KEY,
+        email: currentUser.email,
+        amount: Math.round(parseFloat(amount) * 100),
+        currency: currency,
+        ref: 'PSH-' + Date.now() + '-' + Math.floor(Math.random() * 1000000),
+        metadata: {
+          custom_fields: [
+            {
+              display_name: "Phone Number",
+              variable_name: "phone_number",
+              value: phoneNumber
+            }
+          ]
+        },
+        callback: function(response) {
+          verifyPayment(response.reference, parseFloat(amount), currency);
+        },
+        onClose: function() {
+          setPaymentLoading(false);
+          alert('Payment window closed');
+        }
+      });
+      
+      handler.openIframe();
+    } catch (error) {
+      console.error('Paystack error:', error);
+      alert('Error initializing payment. Please try again.');
+      setPaymentLoading(false);
+    }
   };
 
   const verifyPayment = async (txId, amount, currency) => {
@@ -467,11 +469,15 @@ const Dashboard = ({ onNavigate, user }) => {
       setAmount('');
       setPhoneNumber('');
       setCurrency('USD');
-      await loadTransactions(currentUser);
+      setPaymentLoading(false);
+      
+      // Refresh transactions
+      loadTransactions(currentUser);
       
     } catch (error) {
       console.error('Payment verification error:', error);
       alert('Error processing payment: ' + error.message);
+      setPaymentLoading(false);
     }
   };
 
