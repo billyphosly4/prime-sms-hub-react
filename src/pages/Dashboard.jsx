@@ -1,59 +1,114 @@
 // dashboard.jsx
 import React, { useState, useEffect } from 'react';
-// REMOVE: import { useNavigate } from 'react-router-dom';
 import { auth, db } from '/src/firebasejs/config';
 import { signOut } from 'firebase/auth';
 import {
   doc, getDoc, setDoc, updateDoc,
-  collection, addDoc, query, where, getDocs, serverTimestamp
+  collection, addDoc, query, where, getDocs, serverTimestamp,
+  orderBy, limit
 } from 'firebase/firestore';
+import axios from 'axios';
 import './Dashboard.css';
 
-const Dashboard = ({ onNavigate, user }) => {  // Add onNavigate and user props
+// API Keys from environment variables with fallbacks
+const PAYSTACK_PUBLIC_KEY = import.meta.env.VITE_PAYSTACK_PUBLIC_KEY || 'pk_live_639470fbe710a9b3503068dd875e4b027bd096fe';
+const TELEGRAM_BOT_TOKEN = import.meta.env.VITE_TELEGRAM_BOT_TOKEN;
+const FIVESIM_API_KEY = import.meta.env.VITE_5SIM_API_KEY;
+const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'https://smshub-ftgg.onrender.com';
+const APP_NAME = import.meta.env.VITE_APP_NAME || 'PrimeSmsHub';
+
+const Dashboard = ({ onNavigate, user }) => {
+  // ==================== STATE VARIABLES ====================
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [currentUser, setCurrentUser] = useState(null);
-  const [userData, setUserData] = useState({ fullName: 'User', wallet: 0 });
+  const [userData, setUserData] = useState({ 
+    fullName: 'User', 
+    wallet: 0, 
+    telegramId: null,
+    email: '',
+    phone: ''
+  });
   const [transactions, setTransactions] = useState([]);
   const [activeNumbers, setActiveNumbers] = useState([]);
-  const [paystackKey, setPaystackKey] = useState('pk_live_639470fbe710a9b3503068dd875e4b027bd096fe');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
   
-  // Form states
+  // Page state
+  const [currentPage, setCurrentPage] = useState('dashboard');
+  
+  // Country selection state
+  const [countries, setCountries] = useState([]);
+  const [selectedCountry, setSelectedCountry] = useState('');
+  const [selectedCountryData, setSelectedCountryData] = useState(null);
+  
+  // Service selection state
+  const [services, setServices] = useState([]);
+  const [selectedService, setSelectedService] = useState(null);
+  const [operators, setOperators] = useState([]);
+  const [selectedOperator, setSelectedOperator] = useState('');
+  const [servicePrices, setServicePrices] = useState({});
+  
+  // SMS states
+  const [smsMessages, setSmsMessages] = useState([]);
+  const [selectedNumber, setSelectedNumber] = useState(null);
+  const [checkingSms, setCheckingSms] = useState(false);
+  
+  // Telegram states
+  const [telegramLinked, setTelegramLinked] = useState(false);
+  const [telegramCode, setTelegramCode] = useState('');
+  const [showTelegramModal, setShowTelegramModal] = useState(false);
+  const [telegramLoading, setTelegramLoading] = useState(false);
+  
+  // Payment states
   const [amount, setAmount] = useState('');
   const [phoneNumber, setPhoneNumber] = useState('');
   const [currency, setCurrency] = useState('USD');
-  const [loading, setLoading] = useState(false);
-  const [showNumbers, setShowNumbers] = useState(false);
-  const [showTransactions, setShowTransactions] = useState(false);
+  const [paymentLoading, setPaymentLoading] = useState(false);
 
-  // 5sim states
-  const [countries, setCountries] = useState([]);
-  const [operators, setOperators] = useState([]);
-  const [selectedCountry, setSelectedCountry] = useState('');
-  const [selectedOperator, setSelectedOperator] = useState('');
-  const [services, setServices] = useState([]);
-  const [selectedService, setSelectedService] = useState('');
-  const [smsMessages, setSmsMessages] = useState([]);
-  const [selectedNumber, setSelectedNumber] = useState(null);
+  // ==================== HELPER FUNCTIONS ====================
+  const formatDate = (date) => {
+    if (!date) return 'N/A';
+    return new Date(date).toLocaleDateString('en-US', {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+  };
 
-  // Load user data when component mounts or user changes
+  const getCountryFlag = (countryCode) => {
+    const flags = {
+      ru: '🇷🇺', ua: '🇺🇦', kz: '🇰🇿', us: '🇺🇸', gb: '🇬🇧',
+      de: '🇩🇪', fr: '🇫🇷', es: '🇪🇸', it: '🇮🇹', ca: '🇨🇦',
+      cn: '🇨🇳', jp: '🇯🇵', kr: '🇰🇷', in: '🇮🇳', br: '🇧🇷',
+      mx: '🇲🇽', au: '🇦🇺', nz: '🇳🇿', za: '🇿🇦', ng: '🇳🇬',
+      ke: '🇰🇪', gh: '🇬🇭', eg: '🇪🇬', ma: '🇲🇦'
+    };
+    return flags[countryCode] || '🌍';
+  };
+
+  // ==================== LOAD PAYSTACK SCRIPT ====================
+  useEffect(() => {
+    if (!window.PaystackPop) {
+      const script = document.createElement('script');
+      script.src = 'https://js.paystack.co/v1/inline.js';
+      script.async = true;
+      document.body.appendChild(script);
+    }
+  }, []);
+
+  // ==================== LOAD USER DATA ====================
   useEffect(() => {
     if (user) {
       setCurrentUser(user);
       loadUserData(user);
-      loadPaystackKey();
       loadTransactions(user);
       loadActiveNumbers(user);
       loadCountries();
+      checkTelegramLink(user);
     }
   }, [user]);
-
-  useEffect(() => {
-    if (sidebarOpen) {
-      document.body.style.overflow = 'hidden';
-    } else {
-      document.body.style.overflow = 'unset';
-    }
-  }, [sidebarOpen]);
 
   const loadUserData = async (user) => {
     try {
@@ -66,29 +121,53 @@ const Dashboard = ({ onNavigate, user }) => {  // Add onNavigate and user props
           fullName: user.displayName || user.email?.split('@')[0] || 'User',
           phone: '',
           country: '',
-          address: '',
           wallet: 0,
-          createdAt: serverTimestamp()
+          createdAt: serverTimestamp(),
+          lastLogin: serverTimestamp()
         };
-        await setDoc(userRef, newUserData);
-        setUserData(newUserData);
+        try {
+          await setDoc(userRef, newUserData);
+          setUserData(newUserData);
+        } catch (setError) {
+          console.warn('Could not create user document, using local data');
+          setUserData({
+            ...newUserData,
+            wallet: 0
+          });
+        }
       } else {
         setUserData(userSnap.data());
       }
     } catch (error) {
-      console.error('Error loading user data:', error);
+      console.warn('Using default user data');
+      setUserData({
+        fullName: user.displayName || user.email?.split('@')[0] || 'User',
+        email: user.email,
+        wallet: 0,
+        phone: ''
+      });
     }
   };
 
-  const loadPaystackKey = async () => {
-    console.log('Using Paystack key:', paystackKey);
+  const checkTelegramLink = async (user) => {
+    try {
+      const userRef = doc(db, 'users', user.uid);
+      const userSnap = await getDoc(userRef);
+      if (userSnap.exists() && userSnap.data().telegramId) {
+        setTelegramLinked(true);
+      }
+    } catch (error) {
+      console.warn('Could not check Telegram link:', error);
+    }
   };
 
   const loadTransactions = async (user) => {
     try {
       const q = query(
         collection(db, 'transactions'), 
-        where('uid', '==', user.uid)
+        where('uid', '==', user.uid),
+        orderBy('createdAt', 'desc'),
+        limit(10)
       );
       const snap = await getDocs(q);
       const txList = [];
@@ -100,12 +179,10 @@ const Dashboard = ({ onNavigate, user }) => {  // Add onNavigate and user props
           createdAt: data.createdAt?.toDate?.() || new Date()
         });
       });
-      // Sort by date descending
-      txList.sort((a, b) => b.createdAt - a.createdAt);
       setTransactions(txList);
-      setShowTransactions(txList.length > 0);
     } catch (e) {
-      console.error('Error loading transactions:', e);
+      console.warn('Could not load transactions');
+      setTransactions([]);
     }
   };
 
@@ -123,52 +200,189 @@ const Dashboard = ({ onNavigate, user }) => {  // Add onNavigate and user props
         });
       });
       setActiveNumbers(numbers);
-      setShowNumbers(numbers.length > 0);
     } catch (e) {
-      console.error('Error loading active numbers:', e);
+      console.warn('Could not load active numbers');
+      setActiveNumbers([]);
     }
   };
 
-  // 5sim Functions
+  // ==================== 5SIM INTEGRATION ====================
   const loadCountries = async () => {
-    // Mock data for now - replace with actual API call later
-    setCountries(['Russia', 'Ukraine', 'Kazakhstan', 'USA', 'UK']);
+    setLoading(true);
+    setError(null);
+    
+    // Mock countries data for fallback
+    const mockCountries = [
+      { code: 'ru', name: 'Russia', image: '🇷🇺' },
+      { code: 'ua', name: 'Ukraine', image: '🇺🇦' },
+      { code: 'kz', name: 'Kazakhstan', image: '🇰🇿' },
+      { code: 'us', name: 'United States', image: '🇺🇸' },
+      { code: 'gb', name: 'United Kingdom', image: '🇬🇧' },
+      { code: 'de', name: 'Germany', image: '🇩🇪' },
+      { code: 'fr', name: 'France', image: '🇫🇷' },
+      { code: 'es', name: 'Spain', image: '🇪🇸' },
+      { code: 'it', name: 'Italy', image: '🇮🇹' },
+      { code: 'ca', name: 'Canada', image: '🇨🇦' },
+      { code: 'au', name: 'Australia', image: '🇦🇺' },
+      { code: 'ng', name: 'Nigeria', image: '🇳🇬' },
+      { code: 'ke', name: 'Kenya', image: '🇰🇪' },
+      { code: 'za', name: 'South Africa', image: '🇿🇦' },
+      { code: 'eg', name: 'Egypt', image: '🇪🇬' }
+    ];
+
+    try {
+      // Try to fetch from backend
+      try {
+        const response = await axios.get(`${BACKEND_URL}/api/5sim/countries`, {
+          headers: { 
+            'Authorization': `Bearer ${FIVESIM_API_KEY}`,
+            'Content-Type': 'application/json'
+          },
+          timeout: 5000
+        });
+        
+        if (response.data && typeof response.data === 'object') {
+          const countryList = Object.keys(response.data).map(key => ({
+            code: key,
+            name: response.data[key].name || key.toUpperCase(),
+            image: response.data[key].image || getCountryFlag(key)
+          }));
+          setCountries(countryList);
+        } else {
+          setCountries(mockCountries);
+        }
+      } catch (backendError) {
+        console.warn('Backend not available, using mock data');
+        setCountries(mockCountries);
+      }
+    } catch (error) {
+      console.error('Error loading countries:', error);
+      setCountries(mockCountries);
+    } finally {
+      setLoading(false);
+    }
   };
 
-  const loadOperators = async (country) => {
-    // Mock data for now
-    setOperators(['MTS', 'Beeline', 'Megafon', 'Tele2']);
+  const handleCountrySelect = async (country) => {
+    setSelectedCountry(country.code);
+    setSelectedCountryData(country);
+    setCurrentPage('service-selection');
+    await loadServices(country.code);
   };
 
-  const loadServices = async (country, operator) => {
-    // Mock data for now
-    setServices(['WhatsApp', 'Telegram', 'Viber', 'Facebook', 'Google']);
+  const loadServices = async (countryCode) => {
+    setLoading(true);
+    
+    // Mock services data
+    const mockServices = [
+      { id: 'whatsapp', name: 'WhatsApp', price: 1.99, operators: ['MTS', 'Beeline', 'Megafon'] },
+      { id: 'telegram', name: 'Telegram', price: 1.49, operators: ['MTS', 'Beeline', 'Tele2'] },
+      { id: 'viber', name: 'Viber', price: 1.29, operators: ['Megafon', 'Tele2'] },
+      { id: 'facebook', name: 'Facebook', price: 1.89, operators: ['MTS', 'Beeline', 'Megafon', 'Tele2'] },
+      { id: 'google', name: 'Google', price: 1.59, operators: ['MTS', 'Beeline'] },
+      { id: 'instagram', name: 'Instagram', price: 1.79, operators: ['Megafon', 'Tele2'] },
+      { id: 'twitter', name: 'Twitter', price: 1.39, operators: ['MTS', 'Beeline'] },
+      { id: 'tiktok', name: 'TikTok', price: 1.69, operators: ['Megafon', 'Tele2'] }
+    ];
+
+    try {
+      try {
+        const response = await axios.get(`${BACKEND_URL}/api/5sim/services?country=${countryCode}`, {
+          headers: { 'Authorization': `Bearer ${FIVESIM_API_KEY}` },
+          timeout: 5000
+        });
+        
+        if (response.data && response.data.services) {
+          setServices(response.data.services);
+          setOperators(response.data.operators || []);
+          setServicePrices(response.data.prices || {});
+        } else {
+          setServices(mockServices);
+          setOperators(['MTS', 'Beeline', 'Megafon', 'Tele2']);
+        }
+      } catch (error) {
+        console.warn('Using mock service data');
+        setServices(mockServices);
+        setOperators(['MTS', 'Beeline', 'Megafon', 'Tele2']);
+      }
+    } catch (error) {
+      console.error('Error loading services:', error);
+      setServices(mockServices);
+      setOperators(['MTS', 'Beeline', 'Megafon', 'Tele2']);
+    } finally {
+      setLoading(false);
+    }
   };
 
   const handleBuyNumber = async () => {
-    if (!selectedCountry || !selectedOperator || !selectedService) {
-      alert('Please select country, operator, and service');
+    if (!selectedService) {
+      alert('Please select a service');
       return;
     }
 
-    if (userData.wallet < 1) {
-      alert('Insufficient balance. Please fund your wallet first.');
+    const servicePrice = selectedService.price || 1.00;
+
+    if (userData.wallet < servicePrice) {
+      alert(`Insufficient balance. Please fund your wallet first. Required: $${servicePrice.toFixed(2)}`);
       return;
     }
 
     setLoading(true);
     
-    // Mock purchase for now
+    // Mock purchase
     setTimeout(() => {
-      const mockPhone = '+7' + Math.floor(Math.random() * 1000000000);
+      const mockPhone = `+${Math.floor(Math.random() * 10000000000)}`.substring(0, 13);
+      const newWallet = userData.wallet - servicePrice;
+      
+      // Create mock active number
+      const newNumber = {
+        id: Date.now().toString(),
+        phoneNumber: mockPhone,
+        country: selectedCountryData?.name || selectedCountry,
+        service: selectedService.name,
+        operator: selectedOperator || 'Any',
+        price: servicePrice,
+        purchasedAt: new Date(),
+        status: 'active'
+      };
+      
+      setActiveNumbers([newNumber, ...activeNumbers]);
+      setUserData({ ...userData, wallet: newWallet });
+      
+      // Send Telegram notification if linked
+      if (telegramLinked) {
+        sendTelegramNotification('order', {
+          phoneNumber: mockPhone,
+          service: selectedService.name,
+          price: servicePrice
+        });
+      }
+      
       alert(`✅ Number purchased successfully: ${mockPhone}`);
-      setSelectedCountry('');
+      setCurrentPage('dashboard');
+      setSelectedService(null);
       setSelectedOperator('');
-      setSelectedService('');
       setLoading(false);
+    }, 1500);
+  };
+
+  const handleCheckSMS = async (numberId, phoneNumber) => {
+    setCheckingSms(true);
+    
+    // Mock SMS messages
+    const mockMessages = [
+      { date: new Date(), text: 'Your verification code is: 123456' },
+      { date: new Date(Date.now() - 3600000), text: 'Welcome to the service!' }
+    ];
+    
+    setTimeout(() => {
+      setSelectedNumber(phoneNumber);
+      setSmsMessages(mockMessages);
+      setCheckingSms(false);
     }, 1000);
   };
 
+  // ==================== PAYSTACK INTEGRATION ====================
   const handlePaystackPayment = () => {
     if (!amount || parseFloat(amount) < 1) {
       alert('Please enter a valid amount (minimum $1)');
@@ -179,20 +393,141 @@ const Dashboard = ({ onNavigate, user }) => {  // Add onNavigate and user props
       return;
     }
 
-    // Mock payment for now
-    alert(`Payment processing for $${amount}...`);
-    
-    // Simulate successful payment
-    setTimeout(() => {
-      const newWallet = (userData.wallet || 0) + parseFloat(amount);
+    if (!window.PaystackPop) {
+      alert('Payment system loading. Please try again in a moment.');
+      const script = document.createElement('script');
+      script.src = 'https://js.paystack.co/v1/inline.js';
+      script.onload = () => {
+        setTimeout(() => handlePaystackPayment(), 500);
+      };
+      document.body.appendChild(script);
+      return;
+    }
+
+    setPaymentLoading(true);
+
+    const handler = window.PaystackPop.setup({
+      key: PAYSTACK_PUBLIC_KEY,
+      email: currentUser.email,
+      amount: parseFloat(amount) * 100,
+      currency: currency,
+      ref: 'PSH-' + Math.floor(Math.random() * 1000000000) + 1,
+      metadata: {
+        custom_fields: [
+          {
+            display_name: "Phone Number",
+            variable_name: "phone_number",
+            value: phoneNumber
+          }
+        ]
+      },
+      callback: async (response) => {
+        await verifyPayment(response.reference, parseFloat(amount), currency);
+        setPaymentLoading(false);
+      },
+      onClose: () => {
+        setPaymentLoading(false);
+        alert('Payment window closed');
+      }
+    });
+    handler.openIframe();
+  };
+
+  const verifyPayment = async (txId, amount, currency) => {
+    try {
+      // Mock successful payment
+      const newWallet = (userData.wallet || 0) + amount;
+      
+      // Save transaction to Firestore
+      try {
+        await addDoc(collection(db, 'transactions'), {
+          uid: currentUser.uid,
+          amount,
+          currency,
+          txId,
+          type: 'credit',
+          status: 'success',
+          createdAt: serverTimestamp()
+        });
+      } catch (firestoreError) {
+        console.warn('Could not save transaction to Firestore');
+      }
+
       setUserData({ ...userData, wallet: newWallet });
-      alert(`✅ Wallet funded successfully with $${amount}`);
+      
+      // Send Telegram notification if linked
+      if (telegramLinked) {
+        sendTelegramNotification('wallet', {
+          amount,
+          newBalance: newWallet
+        });
+      }
+
+      alert(`✅ Wallet funded successfully with $${amount} ${currency}`);
       setAmount('');
       setPhoneNumber('');
       setCurrency('USD');
-    }, 1000);
+      await loadTransactions(currentUser);
+      
+    } catch (error) {
+      console.error('Payment verification error:', error);
+      alert('Error processing payment: ' + error.message);
+    }
   };
 
+  // ==================== TELEGRAM INTEGRATION ====================
+  const handleLinkTelegram = async () => {
+    const code = Math.random().toString(36).substring(2, 10).toUpperCase();
+    setTelegramCode(code);
+    setShowTelegramModal(true);
+    setTelegramLoading(false);
+
+    try {
+      await setDoc(doc(db, 'telegramLinks', code), {
+        userId: currentUser.uid,
+        createdAt: serverTimestamp(),
+        expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+        used: false
+      });
+    } catch (error) {
+      console.warn('Could not save telegram link');
+    }
+  };
+
+  const verifyTelegramLink = async () => {
+    setTelegramLoading(true);
+    
+    // Mock verification
+    setTimeout(() => {
+      setTelegramLinked(true);
+      setShowTelegramModal(false);
+      setTelegramLoading(false);
+      alert('✅ Telegram account linked successfully!');
+      
+      // Update user record
+      try {
+        updateDoc(doc(db, 'users', currentUser.uid), {
+          telegramId: 'mock_telegram_id',
+          telegramLinked: true
+        });
+      } catch (error) {
+        console.warn('Could not update telegram status');
+      }
+    }, 1500);
+  };
+
+  const sendTelegramNotification = async (type, data) => {
+    try {
+      await axios.post(`${BACKEND_URL}/api/telegram/notify/${currentUser.uid}`, {
+        type,
+        data
+      });
+    } catch (error) {
+      console.warn('Could not send Telegram notification');
+    }
+  };
+
+  // ==================== AUTH FUNCTIONS ====================
   const handleLogout = async () => {
     try {
       await signOut(auth);
@@ -205,71 +540,213 @@ const Dashboard = ({ onNavigate, user }) => {  // Add onNavigate and user props
   };
 
   const handleNavigation = (page) => {
-    if (onNavigate) {
-      onNavigate(page);
-    }
+    setCurrentPage(page);
     setSidebarOpen(false);
   };
 
-  const formatDate = (date) => {
-    if (!date) return 'N/A';
-    return new Date(date).toLocaleDateString('en-US', {
-      year: 'numeric',
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit'
-    });
-  };
+  // ==================== RENDER FUNCTIONS ====================
+  const renderDashboardContent = () => (
+    <>
+      {/* Welcome Card */}
+      <div className="dashboard-welcome-card">
+        <div className="dashboard-welcome-content">
+          <h1>Welcome back, <span className="user-name">{userData.fullName}</span>! 👋</h1>
+          <p>Select a country below to get started with virtual numbers</p>
+        </div>
+        <div className="dashboard-wallet-info">
+          <div className="dashboard-wallet-balance">
+            <span className="label">Wallet Balance</span>
+            <span className="amount">${(userData.wallet || 0).toFixed(2)}</span>
+          </div>
+        </div>
+      </div>
+
+      {/* Country Selection Grid */}
+      <div className="dashboard-country-selection">
+        <h2>🌍 Choose a Country</h2>
+        {loading ? (
+          <div className="dashboard-loading">Loading countries...</div>
+        ) : (
+          <div className="dashboard-countries-grid">
+            {countries.map(country => (
+              <div 
+                key={country.code} 
+                className="dashboard-country-card"
+                onClick={() => handleCountrySelect(country)}
+              >
+                <span className="dashboard-country-flag">{country.image}</span>
+                <span className="dashboard-country-name">{country.name}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Recent Activity */}
+      <div className="dashboard-recent-activity">
+        <h2>📊 Recent Activity</h2>
+        <div className="dashboard-activity-cards">
+          <div className="dashboard-activity-card">
+            <h3>Active Numbers</h3>
+            <p className="stat">{activeNumbers.length}</p>
+          </div>
+          <div className="dashboard-activity-card">
+            <h3>Transactions</h3>
+            <p className="stat">{transactions.length}</p>
+          </div>
+          <div className="dashboard-activity-card">
+            <h3>Telegram</h3>
+            <p className="stat">{telegramLinked ? '✅ Connected' : '❌ Not Connected'}</p>
+          </div>
+        </div>
+      </div>
+    </>
+  );
+
+  const renderServiceContent = () => (
+    <div className="dashboard-service-page">
+      <button className="dashboard-back-button" onClick={() => setCurrentPage('dashboard')}>
+        ← Back to Countries
+      </button>
+      
+      <div className="dashboard-selected-country-header">
+        <span className="dashboard-country-flag-large">{selectedCountryData?.image}</span>
+        <h2>{selectedCountryData?.name}</h2>
+      </div>
+
+      <div className="service-selection-container">
+        <h3>Select a Service</h3>
+        
+        <div className="form-group">
+          <label>Operator (Optional)</label>
+          <select
+            value={selectedOperator}
+            onChange={(e) => setSelectedOperator(e.target.value)}
+            className="dashboard-select"
+          >
+            <option value="">Any Operator</option>
+            {operators.map(op => (
+              <option key={op} value={op}>{op}</option>
+            ))}
+          </select>
+        </div>
+
+        {loading ? (
+          <div className="dashboard-loading">Loading services...</div>
+        ) : (
+          <>
+            <div className="dashboard-services-grid">
+              {services.map(service => (
+                <div 
+                  key={service.id || service} 
+                  className={`dashboard-service-card ${selectedService?.id === service.id ? 'selected' : ''}`}
+                  onClick={() => setSelectedService(service)}
+                >
+                  <h4>{service.name || service}</h4>
+                  <p className="dashboard-service-price">
+                    ${typeof service === 'object' ? service.price.toFixed(2) : (servicePrices[service] || '1.00')}
+                  </p>
+                  <button className="dashboard-select-service-btn">Select</button>
+                </div>
+              ))}
+            </div>
+
+            {selectedService && (
+              <div className="dashboard-purchase-section">
+                <button 
+                  className="dashboard-purchase-btn"
+                  onClick={handleBuyNumber}
+                  disabled={loading}
+                >
+                  {loading ? 'Processing...' : `Buy Number for $${selectedService.price?.toFixed(2) || '1.00'}`}
+                </button>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+
+      {/* Price Table */}
+      <div className="dashboard-price-table">
+        <h3>📋 Service Prices</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>SERVICE</th>
+              <th>PRICE</th>
+            </tr>
+          </thead>
+          <tbody>
+            {services.map(service => (
+              <tr key={service.id || service}>
+                <td>{service.name || service}</td>
+                <td>${typeof service === 'object' ? service.price.toFixed(2) : (servicePrices[service] || '1.00')}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
 
   return (
-    <div className="dashboard-container">
+    <div className="dashboard-page">
       {/* Header */}
-      <div className="head">
-        <div className="menu-icon" onClick={() => setSidebarOpen(true)}>☰</div>
-        <div className="log">
-          <img src="/hero.png" alt="PrimeSmsHub" />
+      <div className="dashboard-header">
+        <div className="dashboard-menu-icon" onClick={() => setSidebarOpen(true)}>☰</div>
+        <div className="dashboard-logo">
+          <img src="/hero.png" alt={APP_NAME} />
+          <span>{APP_NAME}</span>
         </div>
-        <div className="header-right">
-          <button className="wallet-btn">
-            Wallet: ${(userData.wallet || 0).toFixed(2)}
+        <div className="dashboard-header-right">
+          <button className="dashboard-wallet-btn">
+            💰 ${(userData.wallet || 0).toFixed(2)}
           </button>
-          <a href="#" onClick={(e) => { e.preventDefault(); handleNavigation('profile'); }} className="profile-link" title="Profile">👤</a>
+          <div className="user-menu">
+            <button className="dashboard-profile-btn">
+              {userData.fullName?.charAt(0).toUpperCase()}
+            </button>
+          </div>
         </div>
       </div>
 
       {/* Sidebar */}
-      <aside className={`sidebar ${sidebarOpen ? 'open' : ''}`}>
-        <div className="close-btn" onClick={() => setSidebarOpen(false)}>✕</div>
+      <aside className={`dashboard-sidebar ${sidebarOpen ? 'open' : ''}`}>
+        <div className="dashboard-close-btn" onClick={() => setSidebarOpen(false)}>✕</div>
+        <div className="dashboard-sidebar-header">
+          <img src="/hero.png" alt={APP_NAME} />
+          <h3>{APP_NAME}</h3>
+        </div>
         <nav>
           <ul>
-            <li>
+            <li className={currentPage === 'dashboard' ? 'active' : ''}>
               <a href="#" onClick={(e) => { e.preventDefault(); handleNavigation('dashboard'); }}>
                 <span>🏠</span>Dashboard
               </a>
             </li>
             <li>
               <a href="#" onClick={(e) => { e.preventDefault(); handleNavigation('buy-numbers'); }}>
-                <span>📱</span>Buy Numbers
+                <span>📱</span>Buy Number
               </a>
             </li>
             <li>
               <a href="#" onClick={(e) => { e.preventDefault(); handleNavigation('usa-numbers'); }}>
-                <span>🇺🇸</span>USA Numbers
+                <span>🇺🇸</span>Buy USA Number
               </a>
             </li>
             <li>
               <a href="#" onClick={(e) => { e.preventDefault(); handleNavigation('my-orders'); }}>
                 <span>📦</span>My Orders 
-                <span className="badge">{activeNumbers.length}</span>
+                {activeNumbers.length > 0 && <span className="dashboard-badge">{activeNumbers.length}</span>}
               </a>
             </li>
             <li>
               <a href="#" onClick={(e) => { e.preventDefault(); handleNavigation('transactions'); }}>
                 <span>💳</span>My Transactions 
-                <span className="badge">{transactions.length}</span>
+                {transactions.length > 0 && <span className="dashboard-badge">{transactions.length}</span>}
               </a>
             </li>
+            <li className="divider"></li>
             <li>
               <a href="#" onClick={(e) => { e.preventDefault(); handleNavigation('support'); }}>
                 <span>❓</span>Support
@@ -282,253 +759,220 @@ const Dashboard = ({ onNavigate, user }) => {  // Add onNavigate and user props
             </li>
           </ul>
         </nav>
+
+        <div className="dashboard-sidebar-telegram">
+          {!telegramLinked ? (
+            <button className="dashboard-telegram-link-btn" onClick={handleLinkTelegram}>
+              <span>🤖</span> Connect Telegram
+            </button>
+          ) : (
+            <div className="dashboard-telegram-connected">
+              <span>✅</span> Telegram Connected
+            </div>
+          )}
+        </div>
       </aside>
 
       {/* Overlay */}
       {sidebarOpen && (
-        <div className="overlay show" onClick={() => setSidebarOpen(false)}></div>
+        <div className="dashboard-overlay show" onClick={() => setSidebarOpen(false)}></div>
       )}
 
       {/* Main Content */}
-      <div className="carlos">
-        {/* Hero Section */}
-        <div className="heros">
-          <h1>Welcome, <span>{userData.fullName}</span>! 👋</h1>
-          <p>Verify more for less with virtual phone numbers</p>
-          <div className="wallet-amount">
-            ${(userData.wallet || 0).toFixed(2)}
-          </div>
-          <p style={{ fontSize: '14px', opacity: 0.9 }}>Current Wallet Balance</p>
-        </div>
-
-        {/* Features */}
-        <div className="feature">
-          <div className="feature-cad">
-            <div className="icon">🔒</div>
-            <h4>Secure</h4>
-            <p>Protected transactions</p>
-          </div>
-          <div className="feature-cad">
-            <div className="icon">⚡</div>
-            <h4>Instant</h4>
-            <p>Immediate activation</p>
-          </div>
-          <div className="feature-cad">
-            <div className="icon">💰</div>
-            <h4>Affordable</h4>
-            <p>Best prices</p>
-          </div>
-          <div className="feature-cad">
-            <div className="icon">🌍</div>
-            <h4>Global</h4>
-            <p>Multiple countries</p>
-          </div>
-        </div>
-
-        {/* Main Grid */}
-        <div className="grid">
-          {/* Fund Wallet Card */}
-          <div className="cad">
-            <h3>💳 Fund Your Wallet</h3>
-            <form onSubmit={(e) => e.preventDefault()}>
-              <div className="form-group">
-                <label htmlFor="amount">Amount (USD)</label>
-                <input
-                  type="number"
-                  id="amount"
-                  placeholder="Enter amount"
-                  min="1"
-                  step="0.01"
-                  value={amount}
-                  onChange={(e) => setAmount(e.target.value)}
-                  required
-                />
-              </div>
-              <div className="form-group">
-                <label htmlFor="currency">Currency</label>
-                <select
-                  id="currency"
-                  value={currency}
-                  onChange={(e) => setCurrency(e.target.value)}
-                  required
-                >
-                  <option value="NGN">🇳🇬 Nigerian Naira (NGN)</option>
-                  <option value="GHS">🇬🇭 Ghanaian Cedi (GHS)</option>
-                  <option value="KES">🇰🇪 Kenyan Shilling (KES)</option>
-                  <option value="ZAR">🇿🇦 South African Rand (ZAR)</option>
-                  <option value="USD">🇺🇸 US Dollar (USD)</option>
-                  <option value="ZMW">🇿🇲 Zambian Kwacha (ZMW)</option>
-                  <option value="EGP">🇪🇬 Egyptian Pound (EGP)</option>
-                  <option value="RWF">🇷🇼 Rwandan Franc (RWF)</option>
-                  <option value="UGX">🇺🇬 Ugandan Shilling (UGX)</option>
-                  <option value="TZS">🇹🇿 Tanzanian Shilling (TZS)</option>
-                </select>
-              </div>
-              <div className="form-group">
-                <label htmlFor="phoneNumber">Phone Number</label>
-                <input
-                  type="tel"
-                  id="phoneNumber"
-                  placeholder="Your phone number"
-                  value={phoneNumber}
-                  onChange={(e) => setPhoneNumber(e.target.value)}
-                  required
-                />
-              </div>
-              <button
-                type="button"
-                className="btno"
-                onClick={handlePaystackPayment}
-                disabled={loading}
-              >
-                {loading ? 'Processing...' : 'Proceed to Payment'}
-              </button>
-            </form>
-          </div>
-
-          {/* Quick Actions */}
-          <div className="card">
-            <h3>🚀 Quick Actions</h3>
-            <button
-              className="btno"
-              onClick={() => handleNavigation('buy-numbers')}
-              style={{ marginBottom: '10px', background: '#28a745' }}
-            >
-              Buy Number Now
-            </button>
-            <button
-              className="btno"
-              onClick={() => handleNavigation('usa-numbers')}
-              style={{ marginBottom: '10px', background: '#17a2b8' }}
-            >
-              View Pricing
-            </button>
-            <button
-              className="btno"
-              onClick={() => handleNavigation('support')}
-              style={{ background: '#6c757d' }}
-            >
-              Contact Support
-            </button>
-          </div>
-        </div>
-
-        {/* 5sim Integration Section */}
-        <div className="card" style={{ marginTop: '20px' }}>
-          <h3>📱 Buy Virtual Number (5sim)</h3>
-          <div className="form-group">
-            <label>Country</label>
-            <select
-              value={selectedCountry}
-              onChange={(e) => {
-                setSelectedCountry(e.target.value);
-                loadOperators(e.target.value);
-                setSelectedOperator('');
-                setServices([]);
-              }}
-            >
-              <option value="">Select Country</option>
-              {countries.map(country => (
-                <option key={country} value={country}>{country}</option>
-              ))}
-            </select>
-          </div>
-          <div className="form-group">
-            <label>Operator</label>
-            <select
-              value={selectedOperator}
-              onChange={(e) => {
-                setSelectedOperator(e.target.value);
-                loadServices(selectedCountry, e.target.value);
-                setSelectedService('');
-              }}
-              disabled={!selectedCountry}
-            >
-              <option value="">Select Operator</option>
-              {operators.map(op => (
-                <option key={op} value={op}>{op}</option>
-              ))}
-            </select>
-          </div>
-          <div className="form-group">
-            <label>Service</label>
-            <select
-              value={selectedService}
-              onChange={(e) => setSelectedService(e.target.value)}
-              disabled={!selectedOperator}
-            >
-              <option value="">Select Service</option>
-              {services.map(service => (
-                <option key={service} value={service}>{service}</option>
-              ))}
-            </select>
-          </div>
-          <button
-            className="btno"
-            onClick={handleBuyNumber}
-            disabled={loading || !selectedService}
-            style={{ background: '#007bff' }}
-          >
-            {loading ? 'Processing...' : 'Buy Number'}
-          </button>
-        </div>
-
-        {/* Active Numbers Section */}
-        {showNumbers && (
-          <div id="numbersSection" style={{ marginTop: '30px' }}>
-            <h3 style={{ marginBottom: '20px' }}>📱 Active Numbers</h3>
-            <div className="numbers-grid">
-              {activeNumbers.map(number => (
-                <div key={number.id} className="number-card">
-                  <div className="number">{number.phoneNumber}</div>
-                  <div className="service">Service: {number.service}</div>
-                  <div className="country">Country: {number.country}</div>
-                  <div className="operator">Operator: {number.operator}</div>
-                  <div className="date">Purchased: {formatDate(number.purchasedAt)}</div>
-                </div>
-              ))}
-            </div>
+      <main className="dashboard-main-content">
+        {error && (
+          <div className="dashboard-error">
+            ⚠️ {error}
           </div>
         )}
-
-        {/* Transactions Section */}
-        {showTransactions && (
-          <div id="transactionsSection" style={{ marginTop: '30px' }}>
-            <h3 style={{ marginBottom: '20px' }}>📊 Recent Transactions</h3>
-            <div className="transactions-list">
-              {transactions.slice(0, 10).map(tx => (
-                <div key={tx.id} className="tx-item">
-                  <div>
-                    <div style={{ fontWeight: 600 }}>
-                      {tx.type === 'credit' ? 'Payment Received' : 'Payment Made'}
+        
+        {currentPage === 'dashboard' && renderDashboardContent()}
+        {currentPage === 'service-selection' && renderServiceContent()}
+        
+        {currentPage === 'my-orders' && (
+          <div className="dashboard-orders-page">
+            <h2>📦 My Orders</h2>
+            {activeNumbers.length === 0 ? (
+              <div className="dashboard-empty-state">
+                <p>No active numbers yet</p>
+                <button 
+                  className="dashboard-btn-primary"
+                  onClick={() => setCurrentPage('dashboard')}
+                >
+                  Buy Your First Number
+                </button>
+              </div>
+            ) : (
+              <div className="dashboard-orders-grid">
+                {activeNumbers.map(number => (
+                  <div key={number.id} className="dashboard-order-card">
+                    <div className="dashboard-order-header">
+                      <span className="dashboard-order-number">{number.phoneNumber}</span>
+                      <span className="dashboard-order-status">Active</span>
                     </div>
-                    <div className="date">
-                      {formatDate(tx.createdAt)}
+                    <div className="dashboard-order-details">
+                      <p><strong>Service:</strong> {number.service}</p>
+                      <p><strong>Country:</strong> {number.country}</p>
+                      <p><strong>Operator:</strong> {number.operator}</p>
+                      <p><strong>Price:</strong> ${number.price?.toFixed(2) || '1.00'}</p>
+                      <p><strong>Date:</strong> {formatDate(number.purchasedAt)}</p>
                     </div>
-                    {tx.txId && (
-                      <div className="tx-id" style={{ fontSize: '12px', color: '#999' }}>
-                        ID: {tx.txId.slice(0, 8)}...
+                    <button 
+                      className="dashboard-check-sms-btn"
+                      onClick={() => handleCheckSMS(number.id, number.phoneNumber)}
+                      disabled={checkingSms}
+                    >
+                      {checkingSms ? 'Checking...' : 'Check SMS'}
+                    </button>
+                    {selectedNumber === number.phoneNumber && smsMessages.length > 0 && (
+                      <div className="dashboard-sms-messages">
+                        <h4>SMS Messages:</h4>
+                        {smsMessages.map((msg, idx) => (
+                          <div key={idx} className="dashboard-sms-item">
+                            <div className="dashboard-sms-date">{formatDate(msg.date)}</div>
+                            <div className="dashboard-sms-text">{msg.text}</div>
+                          </div>
+                        ))}
                       </div>
                     )}
                   </div>
-                  <div className={`amount ${tx.type === 'credit' ? 'credit' : 'debit'}`}>
-                    {tx.type === 'credit' ? '+' : '-'}${tx.amount}
-                  </div>
-                </div>
-              ))}
-            </div>
-            {transactions.length > 10 && (
-              <button 
-                className="btno"
-                onClick={() => handleNavigation('transactions')}
-                style={{ marginTop: '20px', background: '#6c757d' }}
-              >
-                View All Transactions
-              </button>
+                ))}
+              </div>
             )}
           </div>
         )}
+        
+        {currentPage === 'transactions' && (
+          <div className="dashboard-transactions-page">
+            <h2>💳 My Transactions</h2>
+            {transactions.length === 0 ? (
+              <div className="dashboard-empty-state">
+                <p>No transactions yet</p>
+                <button 
+                  className="dashboard-btn-primary"
+                  onClick={() => setCurrentPage('dashboard')}
+                >
+                  Fund Your Wallet
+                </button>
+              </div>
+            ) : (
+              <div className="dashboard-transactions-table">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>REFERENCE</th>
+                      <th>AMOUNT</th>
+                      <th>CURRENCY</th>
+                      <th>TYPE</th>
+                      <th>STATUS</th>
+                      <th>DATE</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {transactions.map(tx => (
+                      <tr key={tx.id}>
+                        <td>{tx.txId?.slice(0, 8) || 'N/A'}...</td>
+                        <td>${tx.amount?.toFixed(2) || '0.00'}</td>
+                        <td>{tx.currency || 'USD'}</td>
+                        <td>
+                          <span className={`dashboard-type-badge ${tx.type}`}>
+                            {tx.type || 'credit'}
+                          </span>
+                        </td>
+                        <td>
+                          <span className={`dashboard-status-badge ${tx.status || 'success'}`}>
+                            {tx.status || 'Completed'}
+                          </span>
+                        </td>
+                        <td>{formatDate(tx.createdAt)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
+        
+        {currentPage === 'buy-numbers' && renderServiceContent()}
+        
+        {currentPage === 'usa-numbers' && (
+          <div className="dashboard-usa-page">
+            <h2>🇺🇸 USA Numbers</h2>
+            <p>Coming soon...</p>
+          </div>
+        )}
+        
+        {currentPage === 'support' && (
+          <div className="dashboard-support-page">
+            <h2>❓ Support</h2>
+            <div className="support-content">
+              <p>Contact us at: support@{APP_NAME.toLowerCase()}.com</p>
+              <p>Telegram: @{APP_NAME}Bot</p>
+            </div>
+          </div>
+        )}
+      </main>
+
+      {/* Fund Wallet Section */}
+      <div className="dashboard-fund-section">
+        <h3>💳 Fund Your Wallet</h3>
+        <div className="dashboard-fund-form">
+          <input
+            type="number"
+            placeholder="Amount"
+            value={amount}
+            onChange={(e) => setAmount(e.target.value)}
+            min="1"
+            step="0.01"
+          />
+          <select value={currency} onChange={(e) => setCurrency(e.target.value)}>
+            <option value="USD">🇺🇸 USD</option>
+            <option value="NGN">🇳🇬 NGN</option>
+            <option value="GHS">🇬🇭 GHS</option>
+            <option value="KES">🇰🇪 KES</option>
+            <option value="ZAR">🇿🇦 ZAR</option>
+            <option value="EGP">🇪🇬 EGP</option>
+          </select>
+          <input
+            type="tel"
+            placeholder="Phone Number"
+            value={phoneNumber}
+            onChange={(e) => setPhoneNumber(e.target.value)}
+          />
+          <button onClick={handlePaystackPayment} disabled={paymentLoading}>
+            {paymentLoading ? 'Processing...' : '💳 Pay with Paystack'}
+          </button>
+        </div>
       </div>
+
+      {/* Telegram Modal */}
+      {showTelegramModal && (
+        <div className="dashboard-modal">
+          <div className="dashboard-modal-content">
+            <h3>🔗 Connect Telegram</h3>
+            <p>1. Open Telegram and search for <strong>@{APP_NAME}Bot</strong></p>
+            <p>2. Start a chat and send this code:</p>
+            <div className="dashboard-code-display">{telegramCode}</div>
+            <p>3. Click verify after sending</p>
+            <div className="dashboard-modal-actions">
+              <button 
+                className="dashboard-btn-primary" 
+                onClick={verifyTelegramLink}
+                disabled={telegramLoading}
+              >
+                {telegramLoading ? 'Verifying...' : 'Verify Connection'}
+              </button>
+              <button 
+                className="dashboard-btn-secondary" 
+                onClick={() => setShowTelegramModal(false)}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
