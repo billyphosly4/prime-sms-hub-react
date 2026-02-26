@@ -51,7 +51,7 @@
   color: white;
   border: none;
   padding: 8px 20px;
-  border-radius: 20px;
+  border-radius: 8px;
   font-weight: 600;
   cursor: pointer;
   transition: transform 0.2s;
@@ -592,7 +592,12 @@
   cursor: pointer;
   transition: background 0.2s;
 }
-
+.dashboard-btn{
+  margin-top: 20px;
+  padding: 4px;
+  border-radius: 6px;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+}
 .dashboard-check-sms-btn:hover {
   background: #138496;
 }
@@ -819,22 +824,41 @@
     flex-direction: column;
     text-align: center;
     gap: 20px;
+    margin: 60px;
   }
   
   .dashboard-countries-grid {
     grid-template-columns: repeat(2, 1fr);
+    
   }
-  
+  .dashboard-country-selection{
+    margin: 50px;
+  }
+  .dashboard-recent-activity{
+    margin: 50px;
+  }
+
   .dashboard-fund-section {
-    position: static;
-    width: 100%;
-    margin-top: 20px;
+    position: relative;
+    width: 60%;
+    margin:50px;
+  
   }
   
   .dashboard-services-grid {
     grid-template-columns: 1fr;
   }
+  .dashboard-service-page{
+    margin: 50px;
+  }
+  .dashboard-orders-page{
+    margin: 50px;
+  }
+  .dashboard-transactions-page{
+    margin: 50px;
+  }
 }
+
 
 @media (max-width: 480px) {
   .dashboard-countries-grid {

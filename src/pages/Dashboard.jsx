@@ -802,7 +802,7 @@ const Dashboard = ({ onNavigate, user }) => {
               <div className="dashboard-empty-state">
                 <p>No active numbers yet</p>
                 <button 
-                  className="dashboard-btn-primary"
+                  className="dashboard-btn"
                   onClick={() => setCurrentPage('dashboard')}
                 >
                   Buy Your First Number
@@ -855,7 +855,7 @@ const Dashboard = ({ onNavigate, user }) => {
               <div className="dashboard-empty-state">
                 <p>No transactions yet</p>
                 <button 
-                  className="dashboard-btn-primary"
+                  className="dashboard-btn"
                   onClick={() => setCurrentPage('dashboard')}
                 >
                   Fund Your Wallet
