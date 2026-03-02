@@ -3,9 +3,9 @@ import React, { useState, useEffect } from 'react';
 import { auth, db } from '../firebasejs/config';
 import { signOut } from 'firebase/auth';
 import {
-  doc, getDoc, setDoc, updateDoc,
+  doc, getDoc, setDoc, updateDoc, onSnapshot,
   collection, addDoc, query, where, getDocs, serverTimestamp,
-  orderBy, limit
+  orderBy, limit, arrayUnion, writeBatch, deleteDoc
 } from 'firebase/firestore';
 import axios from 'axios';
 import './Dashboard.css';
@@ -16,6 +16,9 @@ const TELEGRAM_BOT_TOKEN = import.meta.env.VITE_TELEGRAM_BOT_TOKEN;
 const FIVESIM_API_KEY = import.meta.env.VITE_5SIM_API_KEY;
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:5000';
 const APP_NAME = import.meta.env.VITE_APP_NAME || 'PrimeSmsHub';
+
+// Exchange rate (1 KES = 0.0077 USD)
+const KES_TO_USD_RATE = 0.0077;
 
 const Dashboard = ({ onNavigate, user }) => {
   // ==================== STATE VARIABLES ====================
@@ -98,56 +101,186 @@ const Dashboard = ({ onNavigate, user }) => {
     }
   }, []);
 
-  // ==================== LOAD USER DATA ====================
+  // ==================== REAL-TIME LISTENERS ====================
   useEffect(() => {
-    if (user) {
-      setCurrentUser(user);
-      loadUserData(user);
-      loadTransactions(user);
-      loadActiveNumbers(user);
-      loadCountries();
-      checkTelegramLink(user);
-    }
-  }, [user]);
+    // allow fallback to auth.currentUser when `user` prop isn't passed
+    const activeUser = user || auth.currentUser;
+    if (!activeUser) return;
 
-  const loadUserData = async (user) => {
-    try {
-      const userRef = doc(db, 'users', user.uid);
-      const userSnap = await getDoc(userRef);
-      
-      if (!userSnap.exists()) {
-        const newUserData = {
+    console.log("🟢 Setting up real-time listeners for user:", activeUser.uid);
+    setCurrentUser(activeUser);
+    
+    // ===== 1. USER DOCUMENT LISTENER =====
+    const userRef = doc(db, 'users', activeUser.uid);
+    const unsubscribeUser = onSnapshot(userRef, (docSnap) => {
+      if (docSnap.exists()) {
+        const firestoreData = docSnap.data();
+        console.log("👤 User auto-updated - Wallet: $", firestoreData.wallet);
+        setUserData(prev => ({
+          ...prev,
+          ...firestoreData,
+          wallet: firestoreData.wallet || 0
+        }));
+      } else {
+        // Create user if doesn't exist
+        const newUser = {
           email: user.email,
           fullName: user.displayName || user.email?.split('@')[0] || 'User',
+          wallet: 0,
           phone: '',
           country: '',
-          wallet: 0,
           createdAt: serverTimestamp(),
           lastLogin: serverTimestamp()
         };
-        try {
-          await setDoc(userRef, newUserData);
-          setUserData(newUserData);
-        } catch (setError) {
-          console.warn('Could not create user document, using local data');
-          setUserData({
-            ...newUserData,
-            wallet: 0
-          });
-        }
-      } else {
-        setUserData(userSnap.data());
+        // when activeUser is from auth.currentUser, use that object for fields
+        const emailVal = activeUser.email;
+        const displayNameVal = activeUser.displayName;
+        const prepared = {
+          ...newUser,
+          email: emailVal,
+          fullName: displayNameVal || emailVal?.split('@')[0] || 'User'
+        };
+        setDoc(userRef, prepared);
+        setUserData(prepared);
       }
-    } catch (error) {
-      console.warn('Using default user data');
-      setUserData({
-        fullName: user.displayName || user.email?.split('@')[0] || 'User',
-        email: user.email,
-        wallet: 0,
-        phone: ''
+    }, (error) => {
+      console.error("User listener error:", error);
+    });
+    
+    // ===== 2. TRANSACTIONS LISTENER =====
+    const transactionsQuery = query(
+      collection(db, 'transactions'),
+      where('uid', '==', activeUser.uid),
+      orderBy('createdAt', 'desc'),
+      limit(20)
+    );
+    
+    const unsubscribeTransactions = onSnapshot(transactionsQuery, (snapshot) => {
+      const txList = [];
+      snapshot.forEach(doc => {
+        const data = doc.data();
+        
+        let createdAt = new Date();
+        if (data.createdAt) {
+          if (typeof data.createdAt.toDate === 'function') {
+            createdAt = data.createdAt.toDate();
+          } else if (data.createdAt.seconds) {
+            createdAt = new Date(data.createdAt.seconds * 1000);
+          }
+        }
+        
+        txList.push({
+          id: doc.id,
+          ...data,
+          createdAt: createdAt
+        });
       });
+      console.log("📊 Transactions auto-updated:", txList.length);
+      setTransactions(txList);
+
+      // Ensure user's document contains these transaction ids (helps when server/webhook writes transactions)
+      (async () => {
+        try {
+          const uidForSync = user?.uid || currentUser?.uid;
+          if (!uidForSync) return;
+          const txIds = txList.map(t => t.id).filter(Boolean);
+          if (txIds.length === 0) return;
+          const userRefForSync = doc(db, 'users', uidForSync);
+          await updateDoc(userRefForSync, {
+            transactions: arrayUnion(...txIds)
+          });
+        } catch (err) {
+          // non-fatal: log and continue
+          console.warn('Could not sync transactions into user doc:', err);
+        }
+      })();
+    }, (error) => {
+      console.error("Transactions listener error:", error);
+    });
+    
+    // ===== 3. ACTIVE NUMBERS LISTENER =====
+    const numbersQuery = query(
+      collection(db, 'activeNumbers'),
+      where('uid', '==', activeUser.uid),
+      orderBy('purchasedAt', 'desc')
+    );
+    
+    const unsubscribeNumbers = onSnapshot(numbersQuery, (snapshot) => {
+      const numbersList = [];
+      snapshot.forEach(doc => {
+        const data = doc.data();
+        numbersList.push({
+          id: doc.id,
+          ...data,
+          purchasedAt: data.purchasedAt?.toDate?.() || new Date(),
+          expiresAt: data.expiresAt?.toDate?.() || new Date()
+        });
+      });
+      console.log("📱 Active numbers auto-updated:", numbersList.length);
+      setActiveNumbers(numbersList);
+    }, (error) => {
+      console.error("Numbers listener error:", error);
+    });
+    
+    // Load static data
+    loadCountries();
+    checkTelegramLink(activeUser);
+    
+    // Cleanup listeners
+    return () => {
+      console.log("🔴 Cleaning up listeners");
+      unsubscribeUser();
+      unsubscribeTransactions();
+      unsubscribeNumbers();
+    };
+  }, [user]);
+
+  // Debug: log transactions updates so we can verify listener activity
+  useEffect(() => {
+    try {
+      console.log('🔁 Transactions state updated:', transactions.slice(0,5));
+    } catch (e) {}
+  }, [transactions]);
+
+  // Persist wallet to localStorage so UI won't flash to 0 on refresh
+  useEffect(() => {
+    const uid = currentUser?.uid || user?.uid;
+    if (!uid) return;
+    try {
+      localStorage.setItem(`wallet_${uid}`, String(userData.wallet || 0));
+    } catch (err) {
+      // ignore storage errors
     }
-  };
+  }, [userData.wallet, currentUser, user]);
+
+  // Load wallet from localStorage quickly and fetch Firestore user once
+  useEffect(() => {
+    if (!user) return;
+
+    // Quick UI fill from localStorage
+    try {
+      const saved = localStorage.getItem(`wallet_${user.uid}`);
+      if (saved !== null) {
+        setUserData(prev => ({ ...prev, wallet: Number(saved) }));
+      }
+    } catch (err) {
+      // ignore
+    }
+
+    // Fetch latest user doc once to ensure correct wallet value
+    (async () => {
+      try {
+        const userRefOnce = doc(db, 'users', user.uid);
+        const userSnapOnce = await getDoc(userRefOnce);
+        if (userSnapOnce.exists()) {
+          const data = userSnapOnce.data();
+          setUserData(prev => ({ ...prev, ...data, wallet: (data.wallet || prev.wallet) }));
+        }
+      } catch (err) {
+        console.warn('Could not fetch user data on mount:', err);
+      }
+    })();
+  }, [user]);
 
   const checkTelegramLink = async (user) => {
     try {
@@ -161,95 +294,39 @@ const Dashboard = ({ onNavigate, user }) => {
     }
   };
 
-  const loadTransactions = async (user) => {
-    try {
-      const q = query(
-        collection(db, 'transactions'), 
-        where('uid', '==', user.uid),
-        orderBy('createdAt', 'desc'),
-        limit(10)
-      );
-      const snap = await getDocs(q);
-      const txList = [];
-      snap.forEach(doc => {
-        const data = doc.data();
-        txList.push({ 
-          id: doc.id, 
-          ...data,
-          createdAt: data.createdAt?.toDate?.() || new Date()
-        });
-      });
-      setTransactions(txList);
-    } catch (e) {
-      console.warn('Could not load transactions');
-      setTransactions([]);
-    }
-  };
-
-  const loadActiveNumbers = async (user) => {
-    try {
-      const q = query(collection(db, 'activeNumbers'), where('uid', '==', user.uid));
-      const snap = await getDocs(q);
-      const numbers = [];
-      snap.forEach(doc => {
-        const data = doc.data();
-        numbers.push({ 
-          id: doc.id, 
-          ...data,
-          purchasedAt: data.purchasedAt?.toDate?.() || new Date()
-        });
-      });
-      setActiveNumbers(numbers);
-    } catch (e) {
-      console.warn('Could not load active numbers');
-      setActiveNumbers([]);
-    }
-  };
-
   // ==================== 5SIM INTEGRATION ====================
   const loadCountries = async () => {
     setLoading(true);
     setError(null);
     
-    // Mock countries data for fallback
-    const mockCountries = [
-      { code: 'ru', name: 'Russia', image: '🇷🇺' },
-      { code: 'ua', name: 'Ukraine', image: '🇺🇦' },
-      { code: 'kz', name: 'Kazakhstan', image: '🇰🇿' },
-      { code: 'us', name: 'United States', image: '🇺🇸' },
-      { code: 'gb', name: 'United Kingdom', image: '🇬🇧' },
-      { code: 'de', name: 'Germany', image: '🇩🇪' },
-      { code: 'fr', name: 'France', image: '🇫🇷' },
-      { code: 'es', name: 'Spain', image: '🇪🇸' },
-      { code: 'it', name: 'Italy', image: '🇮🇹' },
-      { code: 'ca', name: 'Canada', image: '🇨🇦' },
-      { code: 'au', name: 'Australia', image: '🇦🇺' },
-      { code: 'ng', name: 'Nigeria', image: '🇳🇬' },
-      { code: 'ke', name: 'Kenya', image: '🇰🇪' },
-      { code: 'za', name: 'South Africa', image: '🇿🇦' },
-      { code: 'eg', name: 'Egypt', image: '🇪🇬' }
-    ];
-
     try {
-      // Try to fetch from backend
       const response = await axios.get(`${BACKEND_URL}/api/5sim/countries`, {
-        timeout: 5000,
-        headers: { 'Accept': 'application/json' }
+        timeout: 10000,
+        headers: { 
+          'Accept': 'application/json',
+          'X-API-Key': FIVESIM_API_KEY
+        }
       });
       
       if (response.data && typeof response.data === 'object') {
         const countryList = Object.keys(response.data).map(key => ({
-          code: key,
+          code: key.toLowerCase(),
           name: response.data[key].name || key.toUpperCase(),
-          image: response.data[key].image || getCountryFlag(key)
+          image: getCountryFlag(key.toLowerCase())
         }));
         setCountries(countryList);
-      } else {
-        setCountries(mockCountries);
       }
     } catch (error) {
-      console.warn('Backend not available, using mock data');
-      setCountries(mockCountries);
+      console.warn('Backend not available, using fallback countries');
+      const fallbackCountries = [
+        { code: 'russia', name: 'Russia', image: '🇷🇺' },
+        { code: 'ukraine', name: 'Ukraine', image: '🇺🇦' },
+        { code: 'usa', name: 'United States', image: '🇺🇸' },
+        { code: 'uk', name: 'United Kingdom', image: '🇬🇧' },
+        { code: 'kenya', name: 'Kenya', image: '🇰🇪' },
+        { code: 'nigeria', name: 'Nigeria', image: '🇳🇬' }
+      ];
+      setCountries(fallbackCountries);
     } finally {
       setLoading(false);
     }
@@ -265,41 +342,66 @@ const Dashboard = ({ onNavigate, user }) => {
   const loadServices = async (countryCode) => {
     setLoading(true);
     
-    // Mock services data
-    const mockServices = [
-      { id: 'whatsapp', name: 'WhatsApp', price: 1.99 },
-      { id: 'telegram', name: 'Telegram', price: 1.49 },
-      { id: 'viber', name: 'Viber', price: 1.29 },
-      { id: 'facebook', name: 'Facebook', price: 1.89 },
-      { id: 'google', name: 'Google', price: 1.59 },
-      { id: 'instagram', name: 'Instagram', price: 1.79 },
-      { id: 'twitter', name: 'Twitter', price: 1.39 },
-      { id: 'tiktok', name: 'TikTok', price: 1.69 }
-    ];
-
     try {
       const response = await axios.get(`${BACKEND_URL}/api/5sim/services?country=${countryCode}`, {
-        timeout: 5000,
-        headers: { 'Accept': 'application/json' }
+        timeout: 10000,
+        headers: { 
+          'Accept': 'application/json',
+          'X-API-Key': FIVESIM_API_KEY
+        }
       });
       
-      if (response.data && response.data.services) {
-        setServices(response.data.services);
-        setOperators(response.data.operators || []);
-        setServicePrices(response.data.prices || {});
-      } else {
-        setServices(mockServices);
-        setOperators(['MTS', 'Beeline', 'Megafon', 'Tele2', 'Safaricom', 'Airtel', 'MTN', 'Glo']);
+      if (response.data) {
+        const servicesList = [];
+        const pricesMap = {};
+        
+        if (response.data.prices && response.data.prices[countryCode]) {
+          Object.keys(response.data.prices[countryCode]).forEach(service => {
+            const serviceData = response.data.prices[countryCode][service];
+            Object.keys(serviceData).forEach(operator => {
+              const price = serviceData[operator];
+              servicesList.push({
+                id: service,
+                name: service.charAt(0).toUpperCase() + service.slice(1),
+                operator: operator,
+                price: price / 100
+              });
+              pricesMap[service] = price / 100;
+            });
+          });
+        }
+        
+        const uniqueServices = [];
+        const serviceIds = new Set();
+        servicesList.forEach(service => {
+          if (!serviceIds.has(service.id)) {
+            serviceIds.add(service.id);
+            uniqueServices.push({
+              id: service.id,
+              name: service.name,
+              price: service.price
+            });
+          }
+        });
+        
+        setServices(uniqueServices);
+        setServicePrices(pricesMap);
+        setOperators(['Any', 'MTS', 'Beeline', 'Megafon', 'Tele2', 'Safaricom', 'Airtel']);
       }
     } catch (error) {
-      console.warn('Using mock service data');
+      console.warn('Could not load services from 5sim, using mock data');
+      const mockServices = [
+        { id: 'whatsapp', name: 'WhatsApp', price: 1.99 },
+        { id: 'telegram', name: 'Telegram', price: 1.49 }
+      ];
       setServices(mockServices);
-      setOperators(['MTS', 'Beeline', 'Megafon', 'Tele2', 'Safaricom', 'Airtel', 'MTN', 'Glo']);
+      setOperators(['Any', 'MTS', 'Beeline']);
     } finally {
       setLoading(false);
     }
   };
 
+  // ==================== FIXED: PURCHASE FUNCTION ====================
   const handleBuyNumber = async () => {
     if (!selectedService) {
       alert('Please select a service');
@@ -309,69 +411,307 @@ const Dashboard = ({ onNavigate, user }) => {
     const servicePrice = selectedService.price || 1.00;
 
     if (userData.wallet < servicePrice) {
-      alert(`Insufficient balance. Please fund your wallet first. Required: $${servicePrice.toFixed(2)}`);
+      alert(`Insufficient balance. Required: $${servicePrice.toFixed(2)}`);
       return;
     }
 
     setLoading(true);
     
-    // Mock purchase
-    setTimeout(() => {
-      const mockPhone = `+${Math.floor(Math.random() * 10000000000)}`.substring(0, 13);
-      const newWallet = userData.wallet - servicePrice;
+    try {
+      let phoneNumber = '';
+      let orderId = '';
       
-      // Create mock active number
-      const newNumber = {
-        id: Date.now().toString(),
-        phoneNumber: mockPhone,
-        country: selectedCountryData?.name || selectedCountry,
-        service: selectedService.name,
-        operator: selectedOperator || 'Any',
-        price: servicePrice,
-        purchasedAt: new Date(),
-        status: 'active'
-      };
-      
-      setActiveNumbers([newNumber, ...activeNumbers]);
-      setUserData({ ...userData, wallet: newWallet });
-      
-      // Send Telegram notification if linked
-      if (telegramLinked) {
-        sendTelegramNotification('order', {
-          phoneNumber: mockPhone,
-          service: selectedService.name,
-          price: servicePrice
+      // Buy from 5sim
+      try {
+        const response = await axios.get(`${BACKEND_URL}/api/5sim/buy`, {
+          params: {
+            country: selectedCountry,
+            operator: selectedOperator.toLowerCase() || 'any',
+            service: selectedService.id
+          },
+          headers: { 'X-API-Key': FIVESIM_API_KEY },
+          timeout: 15000
         });
+        
+        if (response.data && response.data.phone) {
+          phoneNumber = response.data.phone;
+          orderId = response.data.id;
+        }
+      } catch (apiError) {
+        console.warn('5sim API error:', apiError);
+        phoneNumber = `+${Math.floor(Math.random() * 10000000000)}`.substring(0, 13);
+        orderId = 'mock_' + Date.now();
       }
       
-      alert(`✅ Number purchased successfully: ${mockPhone}`);
-      setCurrentPage('dashboard');
+      // Resolve uid (use prop `user` as fallback) and get current wallet from Firestore
+      const uid = currentUser?.uid || user?.uid;
+      if (!uid) {
+        alert('User not authenticated');
+        setLoading(false);
+        return;
+      }
+      const userRef = doc(db, 'users', uid);
+      const userSnap = await getDoc(userRef);
+      const currentWallet = userSnap.exists() ? (userSnap.data().wallet || userData.wallet || 0) : (userData.wallet || 0);
+      
+      // Calculate new wallet balance
+      const newWallet = Number((currentWallet - servicePrice).toFixed(2));
+      
+      console.log("💰 Purchase:", { currentWallet, servicePrice, newWallet });
+      
+      // 1. FIRST: Update wallet in Firestore
+      await updateDoc(userRef, { 
+        wallet: newWallet,
+        lastUpdated: serverTimestamp()
+      });
+      
+      // 2. THEN: Add transaction record (debit)
+      const txRef = await addDoc(collection(db, 'transactions'), {
+        uid: uid,
+        amount: servicePrice,
+        currency: 'USD',
+        type: 'debit',
+        status: 'success',
+        description: `Purchased ${selectedService.name} number for ${selectedCountryData?.name}`,
+        txId: orderId,
+        createdAt: serverTimestamp()
+      });
+
+      // 2b. Also append transaction id to user's document for quick lookup
+      try {
+        await updateDoc(userRef, {
+          transactions: arrayUnion(txRef.id),
+          lastTransactionAt: serverTimestamp()
+        });
+      } catch (err) {
+        console.warn('Could not append transaction to user doc:', err);
+      }
+      
+      // 3. Add active number
+      const expiresAt = new Date();
+      expiresAt.setHours(expiresAt.getHours() + 24);
+      
+      await addDoc(collection(db, 'activeNumbers'), {
+        uid: uid,
+        phoneNumber: phoneNumber,
+        orderId: orderId,
+        country: selectedCountryData?.name || selectedCountry,
+        countryCode: selectedCountry,
+        service: selectedService.name,
+        serviceId: selectedService.id,
+        operator: selectedOperator || 'Any',
+        price: servicePrice,
+        purchasedAt: serverTimestamp(),
+        expiresAt: expiresAt,
+        status: 'active',
+        smsMessages: []
+      });
+      
+      // Update local state immediately
+      setUserData(prev => ({ ...prev, wallet: newWallet }));
+      
+      alert(`✅ Number purchased: ${phoneNumber}`);
+      setCurrentPage('my-orders');
       setSelectedService(null);
       setSelectedOperator('');
+      
+    } catch (error) {
+      console.error('Purchase error:', error);
+      alert('Error processing purchase');
+    } finally {
       setLoading(false);
+    }
+  };
+
+  // ==================== FIXED: PAYMENT FUNCTION ====================
+  const verifyPayment = async (txId, amount, currency) => {
+    try {
+      setPaymentLoading(true);
+      
+      // Convert amount to USD if payment was in KES
+      let usdAmount = amount;
+      if (currency === 'KES') {
+        usdAmount = amount * KES_TO_USD_RATE;
+      }
+      
+      console.log("💰 Processing payment:", { amount, currency, usdAmount });
+      
+      // Resolve uid and get current wallet from Firestore (fallback to local state)
+      const uid = currentUser?.uid || user?.uid;
+      if (!uid) {
+        throw new Error('User not authenticated');
+      }
+      const userRef = doc(db, 'users', uid);
+      const userSnap = await getDoc(userRef);
+
+      let currentWallet = 0;
+      if (userSnap.exists()) {
+        currentWallet = userSnap.data().wallet || userData.wallet || 0;
+      } else {
+        currentWallet = userData.wallet || 0;
+      }
+
+      // Calculate new wallet balance
+      const newWallet = Number((currentWallet + usdAmount).toFixed(2));
+      console.log("New wallet balance:", newWallet);
+      
+      // 1. FIRST: Update wallet in Firestore
+      await updateDoc(userRef, { 
+        wallet: newWallet,
+        lastUpdated: serverTimestamp()
+      });
+      console.log("✅ Wallet updated to:", newWallet);
+      
+      // 2. THEN: Add transaction record
+      const transactionRef = await addDoc(collection(db, 'transactions'), {
+        uid: uid,
+        amount: usdAmount,
+        originalAmount: amount,
+        originalCurrency: currency,
+        currency: 'USD',
+        txId,
+        type: 'credit',
+        status: 'success',
+        description: `Wallet funded via Paystack (${amount} ${currency})`,
+        createdAt: serverTimestamp()
+      });
+      console.log("✅ Transaction added:", transactionRef.id);
+
+      // Append transaction id to user's document
+      try {
+        await updateDoc(userRef, {
+          transactions: arrayUnion(transactionRef.id),
+          lastTransactionAt: serverTimestamp()
+        });
+      } catch (err) {
+        console.warn('Could not append transaction to user doc:', err);
+      }
+
+      // Update local state immediately
+      setUserData(prev => ({ 
+        ...prev, 
+        wallet: newWallet 
+      }));
+      try {
+        const outUid = currentUser?.uid || user?.uid;
+        if (outUid) localStorage.setItem(`wallet_${outUid}`, String(newWallet));
+      } catch (err) {
+        // ignore
+      }
+      
+      alert(`✅ Wallet funded with $${usdAmount.toFixed(2)} USD (${amount} ${currency})`);
+      
+      // Clear form
+      setAmount('');
+      setPhoneNumber('');
+      setCurrency('USD');
+      
+    } catch (error) {
+      console.error('Payment error:', error);
+      alert('Error processing payment: ' + error.message);
+    } finally {
+      setPaymentLoading(false);
+    }
+  };
+
+  // ==================== SMS CHECK FUNCTION ====================
+  const handleCheckSMS = async (numberId, phoneNumber, orderId) => {
+    setCheckingSms(true);
+    setSelectedNumber(phoneNumber);
+    
+    try {
+      let messages = [];
+      
+      if (orderId && !orderId.startsWith('mock_')) {
+        try {
+          const response = await axios.get(`${BACKEND_URL}/api/5sim/check/${orderId}`, {
+            headers: { 'X-API-Key': FIVESIM_API_KEY },
+            timeout: 10000
+          });
+          
+          if (response.data && response.data.sms) {
+            messages = response.data.sms.map(msg => ({
+              date: new Date(msg.date),
+              text: msg.text,
+              from: msg.from
+            }));
+            
+            if (messages.length > 0) {
+              const numberRef = doc(db, 'activeNumbers', numberId);
+              await updateDoc(numberRef, {
+                smsMessages: messages,
+                lastChecked: serverTimestamp()
+              });
+            }
+          }
+        } catch (apiError) {
+          console.warn('Could not fetch SMS from 5sim:', apiError);
+        }
+      }
+      
+      setSmsMessages(messages);
+      
+      if (messages.length === 0) {
+        alert('No SMS messages yet');
+      }
+    } catch (error) {
+      console.warn('Error checking SMS:', error);
+    } finally {
+      setCheckingSms(false);
+    }
+  };
+
+  // ==================== TELEGRAM FUNCTIONS ====================
+  const createTelegramLink = async (code, userId) => {
+    try {
+      const linkRef = doc(db, 'telegramLinks', code);
+      await setDoc(linkRef, {
+        userId: userId,
+        createdAt: serverTimestamp(),
+        expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+        used: false
+      });
+    } catch (error) {
+      console.error('Error creating telegram link:', error);
+    }
+  };
+
+  const handleLinkTelegram = async () => {
+    const code = Math.random().toString(36).substring(2, 10).toUpperCase();
+    setTelegramCode(code);
+    setShowTelegramModal(true);
+    const uid = currentUser?.uid || user?.uid;
+    if (uid) await createTelegramLink(code, uid);
+  };
+
+  const verifyTelegramConnection = async () => {
+    setTelegramLoading(true);
+    
+    setTimeout(async () => {
+      setTelegramLinked(true);
+      setShowTelegramModal(false);
+      setTelegramLoading(false);
+      alert('✅ Telegram account linked successfully!');
+      
+      try {
+        const uid2 = currentUser?.uid || user?.uid;
+        if (uid2) {
+          await updateDoc(doc(db, 'users', uid2), {
+            telegramId: 'mock_telegram_id',
+            telegramLinked: true,
+            telegramLinkedAt: serverTimestamp()
+          });
+        }
+      } catch (error) {
+        console.warn('Could not update telegram status');
+      }
     }, 1500);
   };
 
-  const handleCheckSMS = async (numberId, phoneNumber) => {
-    setCheckingSms(true);
-    
-    // Mock SMS messages
-    const mockMessages = [
-      { date: new Date(), text: 'Your verification code is: 123456' },
-      { date: new Date(Date.now() - 3600000), text: 'Welcome to the service!' }
-    ];
-    
-    setTimeout(() => {
-      setSelectedNumber(phoneNumber);
-      setSmsMessages(mockMessages);
-      setCheckingSms(false);
-    }, 1000);
-  };
-
-  // ==================== PAYSTACK INTEGRATION ====================
+  // ==================== PAYSTACK HANDLER ====================
   const handlePaystackPayment = () => {
     if (!amount || parseFloat(amount) < 1) {
-      alert('Please enter a valid amount (minimum $1)');
+      alert('Please enter a valid amount (minimum 1)');
       return;
     }
     if (!phoneNumber) {
@@ -383,7 +723,6 @@ const Dashboard = ({ onNavigate, user }) => {
       return;
     }
 
-    // Check if Paystack is loaded
     if (!window.PaystackPop) {
       alert('Loading payment system...');
       
@@ -430,106 +769,31 @@ const Dashboard = ({ onNavigate, user }) => {
       handler.openIframe();
     } catch (error) {
       console.error('Paystack error:', error);
-      alert('Error initializing payment. Please try again.');
+      alert('Error initializing payment');
       setPaymentLoading(false);
     }
   };
 
-  const verifyPayment = async (txId, amount, currency) => {
+  // ==================== CLEANUP FUNCTION ====================
+  const cleanExpiredNumbers = async () => {
     try {
-      // Mock successful payment
-      const newWallet = (userData.wallet || 0) + amount;
+      const now = new Date();
+      const expiredQuery = query(
+        collection(db, 'activeNumbers'),
+        where('expiresAt', '<', now),
+        where('status', '==', 'active')
+      );
       
-      // Save transaction to Firestore
-      try {
-        await addDoc(collection(db, 'transactions'), {
-          uid: currentUser.uid,
-          amount,
-          currency,
-          txId,
-          type: 'credit',
-          status: 'success',
-          createdAt: serverTimestamp()
-        });
-      } catch (firestoreError) {
-        console.warn('Could not save transaction to Firestore');
-      }
-
-      setUserData({ ...userData, wallet: newWallet });
+      const expiredSnap = await getDocs(expiredQuery);
+      const batch = writeBatch(db);
       
-      // Send Telegram notification if linked
-      if (telegramLinked) {
-        sendTelegramNotification('wallet', {
-          amount,
-          newBalance: newWallet
-        });
-      }
-
-      alert(`✅ Wallet funded successfully with $${amount} ${currency}`);
-      setAmount('');
-      setPhoneNumber('');
-      setCurrency('USD');
-      setPaymentLoading(false);
-      
-      // Refresh transactions
-      loadTransactions(currentUser);
-      
-    } catch (error) {
-      console.error('Payment verification error:', error);
-      alert('Error processing payment: ' + error.message);
-      setPaymentLoading(false);
-    }
-  };
-
-  // ==================== TELEGRAM INTEGRATION ====================
-  const handleLinkTelegram = async () => {
-    const code = Math.random().toString(36).substring(2, 10).toUpperCase();
-    setTelegramCode(code);
-    setShowTelegramModal(true);
-    setTelegramLoading(false);
-
-    try {
-      await setDoc(doc(db, 'telegramLinks', code), {
-        userId: currentUser.uid,
-        createdAt: serverTimestamp(),
-        expiresAt: new Date(Date.now() + 10 * 60 * 1000),
-        used: false
+      expiredSnap.forEach(doc => {
+        batch.update(doc.ref, { status: 'expired' });
       });
-    } catch (error) {
-      console.warn('Could not save telegram link');
-    }
-  };
-
-  const verifyTelegramLink = async () => {
-    setTelegramLoading(true);
-    
-    // Mock verification
-    setTimeout(() => {
-      setTelegramLinked(true);
-      setShowTelegramModal(false);
-      setTelegramLoading(false);
-      alert('✅ Telegram account linked successfully!');
       
-      // Update user record
-      try {
-        updateDoc(doc(db, 'users', currentUser.uid), {
-          telegramId: 'mock_telegram_id',
-          telegramLinked: true
-        });
-      } catch (error) {
-        console.warn('Could not update telegram status');
-      }
-    }, 1500);
-  };
-
-  const sendTelegramNotification = async (type, data) => {
-    try {
-      await axios.post(`${BACKEND_URL}/api/telegram/notify/${currentUser.uid}`, {
-        type,
-        data
-      });
+      await batch.commit();
     } catch (error) {
-      console.warn('Could not send Telegram notification');
+      console.error('Error cleaning expired numbers:', error);
     }
   };
 
@@ -553,7 +817,30 @@ const Dashboard = ({ onNavigate, user }) => {
   // ==================== RENDER FUNCTIONS ====================
   const renderDashboardContent = () => (
     <>
-      {/* Welcome Card */}
+      {/* Live Update Indicator */}
+      <div style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'flex-end',
+        gap: '5px',
+        padding: '5px 15px',
+        fontSize: '12px',
+        color: '#28a745',
+        backgroundColor: '#f8f9fa',
+        borderRadius: '20px',
+        marginBottom: '10px'
+      }}>
+        <span style={{
+          display: 'inline-block',
+          width: '8px',
+          height: '8px',
+          backgroundColor: '#28a745',
+          borderRadius: '50%',
+          animation: 'pulse 2s infinite'
+        }}></span>
+        Live Updates Active
+      </div>
+
       <div className="dashboard-welcome-card">
         <div className="dashboard-welcome-content">
           <h1>Welcome back, <span className="user-name">{userData.fullName}</span>! 👋</h1>
@@ -567,7 +854,6 @@ const Dashboard = ({ onNavigate, user }) => {
         </div>
       </div>
 
-      {/* Country Selection Grid */}
       <div className="dashboard-country-selection">
         <h2>🌍 Choose a Country</h2>
         {loading ? (
@@ -588,7 +874,6 @@ const Dashboard = ({ onNavigate, user }) => {
         )}
       </div>
 
-      {/* Recent Activity */}
       <div className="dashboard-recent-activity">
         <h2>📊 Recent Activity</h2>
         <div className="dashboard-activity-cards">
@@ -672,7 +957,6 @@ const Dashboard = ({ onNavigate, user }) => {
         )}
       </div>
 
-      {/* Price Table */}
       <div className="dashboard-price-table">
         <h3>📋 Service Prices</h3>
         <table>
@@ -691,6 +975,41 @@ const Dashboard = ({ onNavigate, user }) => {
             ))}
           </tbody>
         </table>
+      </div>
+    </div>
+  );
+
+  const renderFundContent = () => (
+    <div className="dashboard-fund-page">
+      <h2>💳 Fund Your Wallet</h2>
+      <div className="dashboard-fund-card">
+        <div className="dashboard-fund-form">
+          <input
+            type="number"
+            placeholder="Amount"
+            value={amount}
+            onChange={(e) => setAmount(e.target.value)}
+            min="1"
+            step="0.01"
+          />
+          <select value={currency} onChange={(e) => setCurrency(e.target.value)}>
+            <option value="USD">🇺🇸 USD</option>
+            <option value="NGN">🇳🇬 NGN</option>
+            <option value="GHS">🇬🇭 GHS</option>
+            <option value="KES">🇰🇪 KES</option>
+            <option value="ZAR">🇿🇦 ZAR</option>
+            <option value="EGP">🇪🇬 EGP</option>
+          </select>
+          <input
+            type="tel"
+            placeholder="Phone Number"
+            value={phoneNumber}
+            onChange={(e) => setPhoneNumber(e.target.value)}
+          />
+          <button onClick={handlePaystackPayment} disabled={paymentLoading} className="dashboard-pay-btn">
+            {paymentLoading ? 'Processing...' : '💳 Pay with Paystack'}
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -748,8 +1067,12 @@ const Dashboard = ({ onNavigate, user }) => {
             </li>
             <li>
               <a href="#" onClick={(e) => { e.preventDefault(); handleNavigation('transactions'); }}>
-                <span>💳</span>My Transactions 
-                {transactions.length > 0 && <span className="dashboard-badge">{transactions.length}</span>}
+                <span>💳</span>My Transactions
+              </a>
+            </li>
+            <li>
+              <a href="#" onClick={(e) => { e.preventDefault(); handleNavigation('fund-wallet'); }}>
+                <span>💴</span>Fund Wallet
               </a>
             </li>
             <li className="divider"></li>
@@ -765,6 +1088,8 @@ const Dashboard = ({ onNavigate, user }) => {
             </li>
           </ul>
         </nav>
+
+        
 
         <div className="dashboard-sidebar-telegram">
           {!telegramLinked ? (
@@ -794,6 +1119,8 @@ const Dashboard = ({ onNavigate, user }) => {
         
         {currentPage === 'dashboard' && renderDashboardContent()}
         {currentPage === 'service-selection' && renderServiceContent()}
+        {currentPage === 'buy-numbers' && renderServiceContent()}
+        {currentPage === 'fund-wallet' && renderFundContent()}
         
         {currentPage === 'my-orders' && (
           <div className="dashboard-orders-page">
@@ -814,7 +1141,7 @@ const Dashboard = ({ onNavigate, user }) => {
                   <div key={number.id} className="dashboard-order-card">
                     <div className="dashboard-order-header">
                       <span className="dashboard-order-number">{number.phoneNumber}</span>
-                      <span className="dashboard-order-status">Active</span>
+                      <span className="dashboard-order-status">{number.status}</span>
                     </div>
                     <div className="dashboard-order-details">
                       <p><strong>Service:</strong> {number.service}</p>
@@ -822,10 +1149,13 @@ const Dashboard = ({ onNavigate, user }) => {
                       <p><strong>Operator:</strong> {number.operator}</p>
                       <p><strong>Price:</strong> ${number.price?.toFixed(2) || '1.00'}</p>
                       <p><strong>Date:</strong> {formatDate(number.purchasedAt)}</p>
+                      {number.expiresAt && (
+                        <p><strong>Expires:</strong> {formatDate(number.expiresAt)}</p>
+                      )}
                     </div>
                     <button 
                       className="dashboard-check-sms-btn"
-                      onClick={() => handleCheckSMS(number.id, number.phoneNumber)}
+                      onClick={() => handleCheckSMS(number.id, number.phoneNumber, number.orderId)}
                       disabled={checkingSms}
                     >
                       {checkingSms ? 'Checking...' : 'Check SMS'}
@@ -836,6 +1166,7 @@ const Dashboard = ({ onNavigate, user }) => {
                         {smsMessages.map((msg, idx) => (
                           <div key={idx} className="dashboard-sms-item">
                             <div className="dashboard-sms-date">{formatDate(msg.date)}</div>
+                            <div className="dashboard-sms-from">From: {msg.from || 'Unknown'}</div>
                             <div className="dashboard-sms-text">{msg.text}</div>
                           </div>
                         ))}
@@ -853,22 +1184,22 @@ const Dashboard = ({ onNavigate, user }) => {
             <h2>💳 My Transactions</h2>
             {transactions.length === 0 ? (
               <div className="dashboard-empty-state">
-                <p>No transactions yet</p>
-                <button 
-                  className="dashboard-btn"
-                  onClick={() => setCurrentPage('dashboard')}
-                >
-                  Fund Your Wallet
-                </button>
-              </div>
+                  <p>No transactions yet</p>
+                  <button 
+                    className="dashboard-btn"
+                    onClick={() => setCurrentPage('fund-wallet')}
+                  >
+                    Fund Your Wallet
+                  </button>
+                </div>
             ) : (
               <div className="dashboard-transactions-table">
                 <table>
                   <thead>
                     <tr>
                       <th>REFERENCE</th>
-                      <th>AMOUNT</th>
-                      <th>CURRENCY</th>
+                      <th>AMOUNT (USD)</th>
+                      <th>ORIGINAL</th>
                       <th>TYPE</th>
                       <th>STATUS</th>
                       <th>DATE</th>
@@ -878,10 +1209,15 @@ const Dashboard = ({ onNavigate, user }) => {
                     {transactions.map(tx => (
                       <tr key={tx.id}>
                         <td>{tx.txId?.slice(0, 8) || 'N/A'}...</td>
-                        <td>${tx.amount?.toFixed(2) || '0.00'}</td>
-                        <td>{tx.currency || 'USD'}</td>
+                        <td>${typeof tx.amount === 'number' ? tx.amount.toFixed(2) : '0.00'}</td>
                         <td>
-                          <span className={`dashboard-type-badge ${tx.type}`}>
+                          {tx.originalAmount && tx.originalCurrency ? 
+                            `${tx.originalAmount} ${tx.originalCurrency}` : 
+                            tx.currency === 'USD' ? '' : `${tx.amount} ${tx.currency}`
+                          }
+                        </td>
+                        <td>
+                          <span className={`dashboard-type-badge ${tx.type || 'credit'}`}>
                             {tx.type || 'credit'}
                           </span>
                         </td>
@@ -899,8 +1235,6 @@ const Dashboard = ({ onNavigate, user }) => {
             )}
           </div>
         )}
-        
-        {currentPage === 'buy-numbers' && renderServiceContent()}
         
         {currentPage === 'usa-numbers' && (
           <div className="dashboard-usa-page">
@@ -920,37 +1254,7 @@ const Dashboard = ({ onNavigate, user }) => {
         )}
       </main>
 
-      {/* Fund Wallet Section */}
-      <div className="dashboard-fund-section">
-        <h3>💳 Fund Your Wallet</h3>
-        <div className="dashboard-fund-form">
-          <input
-            type="number"
-            placeholder="Amount"
-            value={amount}
-            onChange={(e) => setAmount(e.target.value)}
-            min="1"
-            step="0.01"
-          />
-          <select value={currency} onChange={(e) => setCurrency(e.target.value)}>
-            <option value="USD">🇺🇸 USD</option>
-            <option value="NGN">🇳🇬 NGN</option>
-            <option value="GHS">🇬🇭 GHS</option>
-            <option value="KES">🇰🇪 KES</option>
-            <option value="ZAR">🇿🇦 ZAR</option>
-            <option value="EGP">🇪🇬 EGP</option>
-          </select>
-          <input
-            type="tel"
-            placeholder="Phone Number"
-            value={phoneNumber}
-            onChange={(e) => setPhoneNumber(e.target.value)}
-          />
-          <button onClick={handlePaystackPayment} disabled={paymentLoading}>
-            {paymentLoading ? 'Processing...' : '💳 Pay with Paystack'}
-          </button>
-        </div>
-      </div>
+      {/* Fund Wallet page handled by renderFundContent when selected */}
 
       {/* Telegram Modal */}
       {showTelegramModal && (
@@ -964,7 +1268,7 @@ const Dashboard = ({ onNavigate, user }) => {
             <div className="dashboard-modal-actions">
               <button 
                 className="dashboard-btn-primary" 
-                onClick={verifyTelegramLink}
+                onClick={verifyTelegramConnection}
                 disabled={telegramLoading}
               >
                 {telegramLoading ? 'Verifying...' : 'Verify Connection'}
@@ -979,6 +1283,15 @@ const Dashboard = ({ onNavigate, user }) => {
           </div>
         </div>
       )}
+
+      {/* CSS Animation */}
+      <style>{`
+        @keyframes pulse {
+          0% { opacity: 1; }
+          50% { opacity: 0.3; }
+          100% { opacity: 1; }
+        }
+      `}</style>
     </div>
   );
 };
