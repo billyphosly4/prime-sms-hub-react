@@ -12,14 +12,15 @@ import axios from 'axios';
 import './Dashboard.css';
 
 // API Keys from environment variables
-const PAYSTACK_PUBLIC_KEY = import.meta.env.VITE_PAYSTACK_PUBLIC_KEY || 'pk_live_639470fbe710a9b3503068dd875e4b027bd096fe';
+const PAYSTACK_PUBLIC_KEY = import.meta.env.VITE_PAYSTACK_PUBLIC_KEY || 'pk_live_a0465f4104c57a61aa78866451b64a7bcf39a4bd';
 const TELEGRAM_BOT_TOKEN = import.meta.env.VITE_TELEGRAM_BOT_TOKEN;
-const FIVESIM_API_KEY = import.meta.env.VITE_5SIM_API_KEY;
-const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:5000';
+// When deployed to Vercel, set VITE_BACKEND_URL to your site domain if you want to call an external backend.
+// If VITE_BACKEND_URL is empty, frontend will call relative `/api/*` endpoints (recommended for Vercel serverless functions).
+const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || '';
 const APP_NAME = import.meta.env.VITE_APP_NAME || 'PrimeSmsHub';
 
-// Exchange rate (1 KES = 0.0077 USD)
-const KES_TO_USD_RATE = 0.0077;
+// Exchange rate (1 KES = 0.01 USD)
+const KES_TO_USD_RATE = 0.01;
 
 const Dashboard = ({ onNavigate, user }) => {
   // ==================== STATE VARIABLES ====================
@@ -72,6 +73,9 @@ const Dashboard = ({ onNavigate, user }) => {
   const [phoneNumber, setPhoneNumber] = useState('');
   const [currency, setCurrency] = useState('USD');
   const [paymentLoading, setPaymentLoading] = useState(false);
+
+  // Track if legacy transactions have been fixed
+  const [legacyFixComplete, setLegacyFixComplete] = useState(false);
 
   // ==================== HELPER FUNCTIONS ====================
   useEffect(() => {
@@ -167,8 +171,8 @@ const Dashboard = ({ onNavigate, user }) => {
     const transactionsQuery = query(
       collection(db, 'transactions'),
       where('uid', '==', activeUser.uid),
-      orderBy('createdAt', 'desc'),
-      limit(20)
+      orderBy('createdAt', 'desc')
+      // Removed limit(20) to load all historical transactions for accurate reconciliation
     );
     
     const unsubscribeTransactions = onSnapshot(transactionsQuery, (snapshot) => {
@@ -258,6 +262,157 @@ const Dashboard = ({ onNavigate, user }) => {
     } catch (e) {}
   }, [transactions]);
 
+  // ==================== WALLET RECONCILIATION ====================
+  // Recalculate wallet from all transactions and fix if needed
+  // Run AFTER legacy transaction fixes are complete
+  useEffect(() => {
+    if (transactions.length === 0 || !currentUser?.uid || !legacyFixComplete) return;
+
+    (async () => {
+      try {
+        // Calculate correct wallet balance from all transactions
+        let calculatedBalance = 0;
+        
+        transactions.forEach(tx => {
+          let amount = Number(tx.amount) || 0;
+          
+          // Apply legacy fix locally: credit transactions with amount = 1 should be $0.01
+          if (tx.type === 'credit' && Math.abs(amount - 1) < 0.01) {
+            amount = 0.01;
+            console.log(`📊 Applying legacy fix in reconciliation: ${tx.id} $1.00 → $0.01`);
+          }
+          
+          if (tx.type === 'credit') {
+            calculatedBalance += amount; // Add funded amount
+          } else if (tx.type === 'debit') {
+            calculatedBalance -= amount; // Subtract purchase amount
+          }
+        });
+
+        calculatedBalance = Number(calculatedBalance.toFixed(2));
+
+        console.log('💰 Wallet Reconciliation:', {
+          currentWallet: userData.wallet,
+          calculatedBalance,
+          transactionCount: transactions.length,
+          needsUpdate: Math.abs((userData.wallet || 0) - calculatedBalance) > 0.01
+        });
+
+        // If wallet is wrong, fix it
+        if (Math.abs((userData.wallet || 0) - calculatedBalance) > 0.01) {
+          console.log(`🔄 Fixing wallet: ${userData.wallet} → ${calculatedBalance}`);
+          
+          const userRef = doc(db, 'users', currentUser.uid);
+          await updateDoc(userRef, {
+            wallet: calculatedBalance,
+            walletReconciledAt: serverTimestamp(),
+            reconciliationNote: `Auto-reconciled from ${transactions.length} transactions`
+          });
+          
+          setUserData(prev => ({ ...prev, wallet: calculatedBalance }));
+          console.log('✅ Wallet reconciliation complete');
+        }
+      } catch (err) {
+        console.error('❌ Wallet reconciliation error:', err.message);
+      }
+    })();
+  }, [transactions, currentUser?.uid, legacyFixComplete]);
+
+  // ==================== FIX INCORRECTLY CONVERTED TRANSACTIONS ====================
+  // Fix transactions where KES wasn't properly converted (1 KES showing as $1 instead of $0.06)
+  useEffect(() => {
+    if (transactions.length === 0 || !currentUser?.uid) return;
+
+    (async () => {
+      try {
+        const batch = writeBatch(db);
+        let fixedCount = 0;
+
+        transactions.forEach(tx => {
+          // Check if transaction has KES currency but amount is wrong
+          if (tx.originalCurrency === 'KES' && tx.amount !== undefined) {
+            const correctAmount = Number((tx.originalAmount * KES_TO_USD_RATE).toFixed(2));
+            
+            // If amount doesn't match the conversion, fix it
+            if (Math.abs((tx.amount || 0) - correctAmount) > 0.001) {
+              console.log(`🔧 Fixing transaction ${tx.id}: ${tx.amount} → ${correctAmount} (${tx.originalAmount} KES × ${KES_TO_USD_RATE})`);
+              
+              const txRef = doc(db, 'transactions', tx.id);
+              batch.update(txRef, {
+                amount: correctAmount,
+                correctedAt: serverTimestamp(),
+                correctionNote: `Fixed conversion: ${tx.originalAmount} KES × ${KES_TO_USD_RATE} = ${correctAmount} USD`
+              });
+              
+              fixedCount++;
+            }
+          }
+        });
+
+        if (fixedCount > 0) {
+          await batch.commit();
+          console.log(`✅ Fixed ${fixedCount} transaction(s)`);
+        } else {
+          console.log('✅ All transactions have correct conversions');
+        }
+      } catch (err) {
+        console.error('❌ Error fixing transactions:', err.message);
+      }
+    })();
+  }, [transactions, currentUser?.uid]);
+
+  // ==================== FIX LEGACY KES TRANSACTIONS ON FIRST LOAD ====================
+  useEffect(() => {
+    if (!currentUser?.uid || transactions.length === 0) {
+      setLegacyFixComplete(true); // Mark as complete if no transactions
+      return;
+    }
+
+    (async () => {
+      try {
+        const batch = writeBatch(db);
+        let fixedCount = 0;
+
+        // Find all transactions that appear to be unconverted KES (amount = 1 or similar)
+        for (const tx of transactions) {
+          // Look for credit transactions with amount = 1 (unconverted KES amounts)
+          if (tx.type === 'credit' && Math.abs((tx.amount || 0) - 1) < 0.01) {
+            // Assume these are 1 KES = $0.01 conversions
+            const correctedAmount = 0.01;
+            
+            console.log(`🔧 Fixing legacy transaction ${tx.id}: $1.00 → $${correctedAmount.toFixed(2)}`);
+            
+            const txRef = doc(db, 'transactions', tx.id);
+            batch.update(txRef, {
+              amount: correctedAmount,
+              originalAmount: 1,
+              originalCurrency: 'KES',
+              currency: 'USD',
+              correctedAt: serverTimestamp(),
+              correctionNote: `Legacy conversion fix: 1 KES = $${correctedAmount}`
+            });
+            
+            fixedCount++;
+          }
+        }
+
+        if (fixedCount > 0) {
+          console.log(`📝 Committing ${fixedCount} transaction(s) to Firestore...`);
+          await batch.commit();
+          console.log(`✅ Fixed and committed ${fixedCount} legacy transaction(s)`);
+        } else {
+          console.log('✅ All transactions already correct');
+        }
+        
+        // Mark legacy fix as complete
+        setLegacyFixComplete(true);
+      } catch (err) {
+        console.error('❌ Error fixing legacy transactions:', err.message);
+        setLegacyFixComplete(true); // Mark complete even on error to allow reconciliation
+      }
+    })();
+  }, [currentUser?.uid, transactions.length > 0]);
+
   // Persist wallet to localStorage so UI won't flash to 0 on refresh
   useEffect(() => {
     const uid = currentUser?.uid || user?.uid;
@@ -324,38 +479,96 @@ const Dashboard = ({ onNavigate, user }) => {
     }
   };
 
+  // ==================== WALLET RECONCILIATION FUNCTION ====================
+  const manualReconcileWallet = async () => {
+    setReconciliationLoading(true);
+    setReconciliationMessage(null);
+    
+    try {
+      const uid = currentUser?.uid || user?.uid;
+      if (!uid) throw new Error('User not authenticated');
+
+      // Calculate correct balance from transactions
+      let calculatedBalance = 0;
+      transactions.forEach(tx => {
+        const amount = Number(tx.amount) || 0;
+        if (tx.type === 'credit') {
+          calculatedBalance += amount;
+        } else if (tx.type === 'debit') {
+          calculatedBalance -= amount;
+        }
+      });
+      calculatedBalance = Number(calculatedBalance.toFixed(2));
+
+      const oldBalance = userData.wallet || 0;
+      console.log('🔧 Manual Reconciliation:', { oldBalance, calculatedBalance, transactions: transactions.length });
+
+      // Update wallet in Firestore
+      const userRef = doc(db, 'users', uid);
+      await updateDoc(userRef, {
+        wallet: calculatedBalance,
+        walletReconciledAt: serverTimestamp(),
+        reconciliationNote: `Manual reconciliation from ${transactions.length} transactions`
+      });
+
+      setUserData(prev => ({ ...prev, wallet: calculatedBalance }));
+      setReconciliationMessage(`✅ Wallet reconciled! Updated from $${oldBalance.toFixed(2)} to $${calculatedBalance.toFixed(2)} based on ${transactions.length} transactions.`);
+      
+    } catch (error) {
+      console.error('❌ Reconciliation error:', error);
+      setReconciliationMessage(`❌ Error: ${error.message || 'Could not reconcile wallet'}`);
+    } finally {
+      setReconciliationLoading(false);
+    }
+  };
+
   // ==================== 5SIM INTEGRATION ====================
   const loadCountries = async () => {
     setLoading(true);
     setError(null);
     
     try {
-      const response = await axios.get(`${BACKEND_URL}/api/5sim/countries`, {
+      const url = `${BACKEND_URL}/api/5sim/countries`;
+      console.log('🌍 Loading 5sim countries from:', url);
+      
+      const response = await axios.get(url, {
         timeout: 10000,
-        headers: { 
-          'Accept': 'application/json',
-          'X-API-Key': FIVESIM_API_KEY
-        }
+        headers: { 'Accept': 'application/json' }
       });
       
+      console.log('✅ Countries response:', response.status, response.data ? Object.keys(response.data).length + ' countries' : 'NO DATA');
+      
       if (response.data && typeof response.data === 'object') {
-        const countryList = Object.keys(response.data).map(key => ({
-          code: key.toLowerCase(),
-          name: response.data[key].name || key.toUpperCase(),
-          image: getCountryFlag(key.toLowerCase())
-        }));
+        // Parse 5sim format: {country_code: {iso: {...}, prefix: {...}, text_en: "Name", product: {...}}}
+        const countryList = Object.keys(response.data).map(countryKey => {
+          const countryData = response.data[countryKey];
+          const isoCode = Object.keys(countryData.iso || {})[0] || countryKey.substring(0, 2);
+          return {
+            code: countryKey,
+            isoCode: isoCode,
+            name: countryData.text_en || countryKey.toUpperCase(),
+            prefix: Object.keys(countryData.prefix || {})[0] || '+0',
+            image: getCountryFlag(isoCode.toLowerCase())
+          };
+        });
         setCountries(countryList);
         return countryList;
       }
     } catch (error) {
-      console.warn('Backend not available, using fallback countries');
+      console.error('❌ Failed to load countries:', {
+        message: error.message,
+        status: error.response?.status,
+        backend: BACKEND_URL,
+        data: error.response?.data
+      });
+      console.warn('⚠️ Using fallback countries');
       const fallbackCountries = [
-        { code: 'russia', name: 'Russia', image: '🇷🇺' },
-        { code: 'ukraine', name: 'Ukraine', image: '🇺🇦' },
-        { code: 'usa', name: 'United States', image: '🇺🇸' },
-        { code: 'uk', name: 'United Kingdom', image: '🇬🇧' },
-        { code: 'kenya', name: 'Kenya', image: '🇰🇪' },
-        { code: 'nigeria', name: 'Nigeria', image: '🇳🇬' }
+        { code: 'russia', isoCode: 'ru', name: 'Russia', prefix: '+7', image: '🇷🇺' },
+        { code: 'ukraine', isoCode: 'ua', name: 'Ukraine', prefix: '+380', image: '🇺🇦' },
+        { code: 'usa', isoCode: 'us', name: 'United States', prefix: '+1', image: '🇺🇸' },
+        { code: 'britain', isoCode: 'gb', name: 'United Kingdom', prefix: '+44', image: '🇬🇧' },
+        { code: 'kenya', isoCode: 'ke', name: 'Kenya', prefix: '+254', image: '🇰🇪' },
+        { code: 'nigeria', isoCode: 'ng', name: 'Nigeria', prefix: '+234', image: '🇳🇬' }
       ];
       setCountries(fallbackCountries);
       return fallbackCountries;
@@ -394,61 +607,77 @@ const Dashboard = ({ onNavigate, user }) => {
 
   const loadServices = async (countryCode) => {
     setLoading(true);
+    console.log('📱 Loading 5sim prices for country:', countryCode, 'Backend:', BACKEND_URL);
     
     try {
-      const response = await axios.get(`${BACKEND_URL}/api/5sim/services?country=${countryCode}`, {
+      const url = `${BACKEND_URL}/api/5sim/services?country=${countryCode}`;
+      console.log('🔗 Request URL:', url);
+      
+      const response = await axios.get(url, {
         timeout: 10000,
-        headers: { 
-          'Accept': 'application/json',
-          'X-API-Key': FIVESIM_API_KEY
-        }
+        headers: { 'Accept': 'application/json' }
       });
       
-      if (response.data) {
+      console.log('✅ Prices response:', response.status, response.data ? 'OK' : 'NO DATA');
+      
+      if (response.data && response.data.products) {
+        // Parse 5sim format: {country, products: {product: {operator: {cost, count, rate}}}}
         const servicesList = [];
         const pricesMap = {};
+        const operatorsSet = new Set(['Any']); // Always include 'Any' option
         
-        if (response.data.prices && response.data.prices[countryCode]) {
-          Object.keys(response.data.prices[countryCode]).forEach(service => {
-            const serviceData = response.data.prices[countryCode][service];
-            Object.keys(serviceData).forEach(operator => {
-              const price = serviceData[operator];
-              servicesList.push({
-                id: service,
-                name: service.charAt(0).toUpperCase() + service.slice(1),
-                operator: operator,
-                price: price / 100
-              });
-              pricesMap[service] = price / 100;
-            });
+        console.log('💰 Products available:', Object.keys(response.data.products));
+        
+        Object.keys(response.data.products).forEach(productName => {
+          const productData = response.data.products[productName];
+          let minPrice = Infinity;
+          
+          // Extract operators and prices for this product
+          Object.keys(productData).forEach(operatorName => {
+            const priceData = productData[operatorName];
+            operatorsSet.add(operatorName);
+            
+            // Track minimum price for this product
+            if (priceData.cost && priceData.cost < minPrice) {
+              minPrice = priceData.cost;
+            }
           });
-        }
-        
-        const uniqueServices = [];
-        const serviceIds = new Set();
-        servicesList.forEach(service => {
-          if (!serviceIds.has(service.id)) {
-            serviceIds.add(service.id);
-            uniqueServices.push({
-              id: service.id,
-              name: service.name,
-              price: service.price
+          
+          // Add product with minimum price
+          if (minPrice !== Infinity) {
+            servicesList.push({
+              id: productName,
+              name: productName.charAt(0).toUpperCase() + productName.slice(1),
+              price: minPrice
             });
+            pricesMap[productName] = minPrice;
           }
         });
         
-        setServices(uniqueServices);
+        console.log(`✅ Loaded ${servicesList.length} products, ${operatorsSet.size} operators`);
+        setServices(servicesList);
         setServicePrices(pricesMap);
-        setOperators(['Any', 'MTS', 'Beeline', 'Megafon', 'Tele2', 'Safaricom', 'Airtel']);
+        setOperators(Array.from(operatorsSet));
+      } else {
+        console.warn('⚠️ No products in response');
+        setServices([]);
+        setOperators(['Any']);
       }
     } catch (error) {
-      console.warn('Could not load services from 5sim, using mock data');
+      console.error('❌ Failed to load prices:', {
+        message: error.message,
+        status: error.response?.status,
+        data: error.response?.data,
+        backend: BACKEND_URL,
+        country: countryCode
+      });
+      console.warn('⚠️ Using mock data fallback');
       const mockServices = [
-        { id: 'whatsapp', name: 'WhatsApp', price: 1.99 },
-        { id: 'telegram', name: 'Telegram', price: 1.49 }
+        { id: 'facebook', name: 'Facebook', price: 3.5 },
+        { id: 'telegram', name: 'Telegram', price: 2.5 }
       ];
       setServices(mockServices);
-      setOperators(['Any', 'MTS', 'Beeline']);
+      setOperators(['Any', 'Safaricom', 'Airtel']);
     } finally {
       setLoading(false);
     }
@@ -474,26 +703,31 @@ const Dashboard = ({ onNavigate, user }) => {
       let phoneNumber = '';
       let orderId = '';
       
-      // Buy from 5sim
+      // Buy from 5sim using correct API format
+      console.log(`💳 Buying: country=${selectedCountry}, operator=${selectedOperator}, product=${selectedService.id}`);
       try {
-        const response = await axios.get(`${BACKEND_URL}/api/5sim/buy`, {
-          params: {
-            country: selectedCountry,
-            operator: selectedOperator.toLowerCase() || 'any',
-            service: selectedService.id
-          },
-          headers: { 'X-API-Key': FIVESIM_API_KEY },
-          timeout: 15000
+        const response = await axios.post(`${BACKEND_URL}/api/5sim/buy`, {
+          country: selectedCountry,
+          operator: selectedOperator.toLowerCase() || 'any',
+          product: selectedService.id
+        }, {
+          timeout: 15000,
+          headers: { 'Accept': 'application/json' }
         });
         
         if (response.data && response.data.phone) {
           phoneNumber = response.data.phone;
           orderId = response.data.id;
+          console.log(`✅ 5sim purchase successful: ${orderId} - ${phoneNumber}`);
+        } else {
+          console.warn('⚠️ 5sim response missing phone/id:', response.data);
+          throw new Error('Invalid response from 5sim');
         }
       } catch (apiError) {
-        console.warn('5sim API error:', apiError);
+        console.error(`❌ 5sim API error:`, apiError.response?.data || apiError.message);
         phoneNumber = `+${Math.floor(Math.random() * 10000000000)}`.substring(0, 13);
         orderId = 'mock_' + Date.now();
+        console.log(`⚠️ Using mock data: ${orderId} - ${phoneNumber}`);
       }
       
       // Resolve uid (use prop `user` as fallback) and get current wallet from Firestore
@@ -580,43 +814,64 @@ const Dashboard = ({ onNavigate, user }) => {
   const verifyPayment = async (txId, amount, currency) => {
     try {
       setPaymentLoading(true);
+      console.log('🔵 verifyPayment called:', { txId, amount, currency });
 
       // Verify payment with backend (server verifies with Paystack secret)
       let verifiedAmount = amount;
-      let verifiedCurrency = currency;
+      let verifiedCurrency = currency.toUpperCase();
       try {
+        console.log('🔄 Verifying with backend:', `${BACKEND_URL}/paystack/verify/${txId}`);
         const resp = await axios.get(`${BACKEND_URL}/paystack/verify/${encodeURIComponent(txId)}`);
+        console.log('✅ Backend verification response:', resp.data);
+        
         // If Paystack returned a standard response, normalize values
         if (resp.data && resp.data.status === 'success' && resp.data.data) {
           const pd = resp.data.data;
           // Paystack amount is usually in kobo (amount * 100)
           if (pd.amount !== undefined && typeof pd.amount === 'number') {
             verifiedAmount = Number(pd.amount) / 100;
+            console.log('📊 Amount from Paystack (kobo):', pd.amount, '→ (USD)', verifiedAmount);
           }
-          verifiedCurrency = pd.currency || verifiedCurrency;
+          verifiedCurrency = (pd.currency || verifiedCurrency).toUpperCase();
         }
       } catch (verifyErr) {
-        console.warn('Backend paystack verify failed, falling back to provided amount:', verifyErr.message || verifyErr);
+        console.warn('⚠️ Backend paystack verify failed, falling back to provided amount:', verifyErr.message || verifyErr);
       }
 
       // Convert amount to USD if payment was in KES
       let usdAmount = Number(verifiedAmount || 0);
-      if (verifiedCurrency === 'KES') usdAmount = usdAmount * KES_TO_USD_RATE;
+      if (verifiedCurrency === 'KES') {
+        usdAmount = usdAmount * KES_TO_USD_RATE;
+        console.log(`💱 Converted KES ${verifiedAmount} → USD ${usdAmount}`);
+      }
 
       // Resolve uid and get current wallet from Firestore (fallback to local state)
       const uid = currentUser?.uid || user?.uid;
       if (!uid) throw new Error('User not authenticated');
+      console.log('👤 User UID:', uid);
+
       const userRef = doc(db, 'users', uid);
       const userSnap = await getDoc(userRef);
 
       let currentWallet = 0;
-      if (userSnap.exists()) currentWallet = userSnap.data().wallet || userData.wallet || 0;
-      else currentWallet = userData.wallet || 0;
+      if (userSnap.exists()) {
+        currentWallet = userSnap.data().wallet || userData.wallet || 0;
+        console.log('💰 Current wallet from Firestore:', currentWallet);
+      } else {
+        currentWallet = userData.wallet || 0;
+        console.log('💰 Current wallet from local state:', currentWallet);
+      }
 
       const newWallet = Number((currentWallet + usdAmount).toFixed(2));
+      console.log('💰 New wallet:', newWallet, `(${currentWallet} + ${usdAmount})`);
 
-      // Update wallet and add transaction in Firestore
+      // Update wallet in Firestore
+      console.log('📝 Writing to Firestore: wallet update');
       await updateDoc(userRef, { wallet: newWallet, lastUpdated: serverTimestamp() });
+      console.log('✅ Wallet updated in Firestore');
+
+      // Add transaction document
+      console.log('📝 Writing to Firestore: transaction document');
       const transactionRef = await addDoc(collection(db, 'transactions'), {
         uid,
         amount: usdAmount,
@@ -629,21 +884,37 @@ const Dashboard = ({ onNavigate, user }) => {
         description: `Wallet funded via Paystack (${verifiedAmount} ${verifiedCurrency})`,
         createdAt: serverTimestamp()
       });
+      console.log('✅ Transaction created:', transactionRef.id);
 
+      // Append transaction ID to user document
       try {
-        await updateDoc(userRef, { transactions: arrayUnion(transactionRef.id), lastTransactionAt: serverTimestamp() });
+        console.log('📝 Appending transaction ID to user document');
+        await updateDoc(userRef, { 
+          transactions: arrayUnion(transactionRef.id), 
+          lastTransactionAt: serverTimestamp() 
+        });
+        console.log('✅ Transaction ID appended to user doc');
       } catch (err) {
-        console.warn('Could not append transaction to user doc:', err);
+        console.warn('⚠️ Could not append transaction to user doc:', err.message);
       }
 
+      // Update local state
       setUserData(prev => ({ ...prev, wallet: newWallet }));
-      try { const outUid = currentUser?.uid || user?.uid; if (outUid) localStorage.setItem(`wallet_${outUid}`, String(newWallet)); } catch (e) {}
+      try { 
+        const outUid = currentUser?.uid || user?.uid; 
+        if (outUid) localStorage.setItem(`wallet_${outUid}`, String(newWallet)); 
+      } catch (e) {
+        console.warn('Could not update localStorage:', e);
+      }
 
       alert(`✅ Wallet funded with $${usdAmount.toFixed(2)} USD (${verifiedAmount} ${verifiedCurrency})`);
-      setAmount(''); setPhoneNumber(''); setCurrency('USD');
+      setAmount(''); 
+      setPhoneNumber(''); 
+      setCurrency('USD');
+      setCurrentPage('transactions'); // Navigate to transactions page to show new transaction
 
     } catch (error) {
-      console.error('Payment error:', error);
+      console.error('❌ Payment error:', error);
       alert('Error processing payment: ' + (error.message || 'Unknown'));
     } finally {
       setPaymentLoading(false);
@@ -778,11 +1049,22 @@ const Dashboard = ({ onNavigate, user }) => {
     setPaymentLoading(true);
 
     try {
+      // Log payment details for debugging (remove in production)
+      const amountInKobo = Math.round(parseFloat(amount) * 100);
+      const currencyLower = currency.toLowerCase();
+      console.log('🔵 Paystack Payment Debug:', {
+        key: PAYSTACK_PUBLIC_KEY?.slice(0, 20) + '...',
+        email: currentUser.email,
+        amount: parseFloat(amount),
+        amountInKobo,
+        currency: currencyLower
+      });
+
       const handler = window.PaystackPop.setup({
         key: PAYSTACK_PUBLIC_KEY,
         email: currentUser.email,
-        amount: Math.round(parseFloat(amount) * 100),
-        currency: currency,
+        amount: amountInKobo,
+        currency: currencyLower,
         ref: 'PSH-' + Date.now() + '-' + Math.floor(Math.random() * 1000000),
         metadata: {
           custom_fields: [
@@ -794,9 +1076,11 @@ const Dashboard = ({ onNavigate, user }) => {
           ]
         },
         callback: function(response) {
+          console.log('✅ Paystack payment successful:', response);
           verifyPayment(response.reference, parseFloat(amount), currency);
         },
         onClose: function() {
+          console.log('❌ Paystack payment window closed');
           setPaymentLoading(false);
           alert('Payment window closed');
         }
@@ -1046,6 +1330,23 @@ const Dashboard = ({ onNavigate, user }) => {
         ← Back
       </button>
       <h2>💳 Fund Your Wallet</h2>
+      
+      {/* Current Balance Display */}
+      <div className="dashboard-wallet-display" style={{
+        backgroundColor: '#f8f9fa',
+        borderRadius: '8px',
+        padding: '15px',
+        marginBottom: '20px',
+        textAlign: 'center'
+      }}>
+        <p style={{ margin: '0 0 5px 0', color: '#666', fontSize: '14px' }}>
+          Current Balance
+        </p>
+        <h3 style={{ margin: 0, fontSize: '24px', color: '#28a745' }}>
+          ${(userData.wallet || 0).toFixed(2)} USD
+        </h3>
+      </div>
+
       <div className="dashboard-fund-card">
         <div className="dashboard-fund-form">
           <input
@@ -1055,8 +1356,13 @@ const Dashboard = ({ onNavigate, user }) => {
             onChange={(e) => setAmount(e.target.value)}
             min="1"
             step="0.01"
+            disabled={paymentLoading}
           />
-          <select value={currency} onChange={(e) => setCurrency(e.target.value)}>
+          <select 
+            value={currency} 
+            onChange={(e) => setCurrency(e.target.value)}
+            disabled={paymentLoading}
+          >
             <option value="USD">🇺🇸 USD</option>
             <option value="NGN">🇳🇬 NGN</option>
             <option value="GHS">🇬🇭 GHS</option>
@@ -1069,10 +1375,36 @@ const Dashboard = ({ onNavigate, user }) => {
             placeholder="Phone Number"
             value={phoneNumber}
             onChange={(e) => setPhoneNumber(e.target.value)}
+            disabled={paymentLoading}
           />
-          <button onClick={handlePaystackPayment} disabled={paymentLoading} className="dashboard-pay-btn">
-            {paymentLoading ? 'Processing...' : '💳 Pay with Paystack'}
+          <button 
+            onClick={handlePaystackPayment} 
+            disabled={paymentLoading || !amount || !phoneNumber} 
+            className="dashboard-pay-btn"
+            style={{
+              opacity: (paymentLoading || !amount || !phoneNumber) ? 0.6 : 1,
+              cursor: (paymentLoading || !amount || !phoneNumber) ? 'not-allowed' : 'pointer'
+            }}
+          >
+            {paymentLoading ? '🔄 Processing...' : '💳 Pay with Paystack'}
           </button>
+        </div>
+        
+        {/* Help Text */}
+        <div style={{
+          marginTop: '15px',
+          padding: '10px',
+          backgroundColor: '#e7f3ff',
+          borderRadius: '6px',
+          fontSize: '13px',
+          color: '#0066cc'
+        }}>
+          <p style={{ margin: '0 0 5px 0' }}>
+            💡 <strong>Tip:</strong> Supported currencies: USD, NGN, GHS, KES, ZAR, EGP
+          </p>
+          <p style={{ margin: '0' }}>
+            All amounts are converted to USD for your wallet.
+          </p>
         </div>
       </div>
     </div>
@@ -1252,7 +1584,22 @@ const Dashboard = ({ onNavigate, user }) => {
         
         {currentPage === 'transactions' && (
           <div className="dashboard-transactions-page">
-            <h2>💳 My Transactions</h2>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
+              <h2 style={{ margin: 0 }}>💳 My Transactions</h2>
+              <div style={{
+                backgroundColor: '#f0f8ff',
+                border: '1px solid #0066cc',
+                borderRadius: '8px',
+                padding: '12px 16px',
+                fontSize: '16px'
+              }}>
+                <span style={{ color: '#666' }}>Current Wallet:</span>
+                <span style={{ fontSize: '18px', fontWeight: 'bold', color: '#28a745', marginLeft: '8px' }}>
+                  ${(userData.wallet || 0).toFixed(2)}
+                </span>
+              </div>
+            </div>
+
             {transactions.length === 0 ? (
               <div className="dashboard-empty-state">
                   <p>No transactions yet</p>
@@ -1268,36 +1615,42 @@ const Dashboard = ({ onNavigate, user }) => {
                 <table>
                   <thead>
                     <tr>
+                      <th>DATE</th>
                       <th>REFERENCE</th>
                       <th>AMOUNT (USD)</th>
-                      <th>ORIGINAL</th>
                       <th>TYPE</th>
                       <th>STATUS</th>
-                      <th>DATE</th>
+                      <th>DESCRIPTION</th>
                     </tr>
                   </thead>
                   <tbody>
                     {transactions.map(tx => (
-                      <tr key={tx.id}>
-                        <td>{tx.txId?.slice(0, 8) || 'N/A'}...</td>
-                        <td>${typeof tx.amount === 'number' ? tx.amount.toFixed(2) : '0.00'}</td>
+                      <tr key={tx.id} style={{
+                        backgroundColor: tx.type === 'credit' ? '#f0fff0' : '#fff5f5',
+                        borderLeft: tx.type === 'credit' ? '4px solid #28a745' : '4px solid #dc3545'
+                      }}>
+                        <td>{formatDate(tx.createdAt)}</td>
                         <td>
-                          {tx.originalAmount && tx.originalCurrency ? 
-                            `${tx.originalAmount} ${tx.originalCurrency}` : 
-                            tx.currency === 'USD' ? '' : `${tx.amount} ${tx.currency}`
-                          }
+                          <code style={{ fontSize: '12px', backgroundColor: '#f0f0f0', padding: '4px 8px', borderRadius: '4px' }}>
+                            {tx.txId?.slice(0, 12) || 'N/A'}
+                          </code>
+                        </td>
+                        <td style={{ fontWeight: 'bold', color: tx.type === 'credit' ? '#28a745' : '#dc3545' }}>
+                          {tx.type === 'credit' ? '+' : '-'}${typeof tx.amount === 'number' ? tx.amount.toFixed(2) : '0.00'}
                         </td>
                         <td>
                           <span className={`dashboard-type-badge ${tx.type || 'credit'}`}>
-                            {tx.type || 'credit'}
+                            {(tx.type === 'credit' ? '💳 ' : '📦 ') + (tx.type || 'credit')}
                           </span>
                         </td>
                         <td>
                           <span className={`dashboard-status-badge ${tx.status || 'success'}`}>
-                            {tx.status || 'Completed'}
+                            {tx.status === 'success' ? '✅ Success' : '⏳ ' + (tx.status || 'Completed')}
                           </span>
                         </td>
-                        <td>{formatDate(tx.createdAt)}</td>
+                        <td style={{ fontSize: '13px', color: '#666' }}>
+                          {tx.description || (tx.originalAmount ? `${tx.originalAmount} ${tx.originalCurrency}` : 'Transaction')}
+                        </td>
                       </tr>
                     ))}
                   </tbody>

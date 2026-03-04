@@ -17,63 +17,84 @@ app.use(cors({
 
 app.use(express.json());
 
-// ==================== 5SIM MOCK API ====================
+// ==================== 5SIM MOCK DATA ====================
+// Mock countries - 5sim API returns: {country: {iso: {code: 1}, prefix: {+prefix: 1}, text_en: "Name", operator: {category: 1}}}
 const mockCountries = {
-  ru: { name: 'Russia', image: '🇷🇺' },
-  ua: { name: 'Ukraine', image: '🇺🇦' },
-  kz: { name: 'Kazakhstan', image: '🇰🇿' },
-  us: { name: 'United States', image: '🇺🇸' },
-  gb: { name: 'United Kingdom', image: '🇬🇧' },
-  ke: { name: 'Kenya', image: '🇰🇪' },
-  ng: { name: 'Nigeria', image: '🇳🇬' },
-  za: { name: 'South Africa', image: '🇿🇦' },
-  eg: { name: 'Egypt', image: '🇪🇬' },
-  gh: { name: 'Ghana', image: '🇬🇭' },
-  de: { name: 'Germany', image: '🇩🇪' },
-  fr: { name: 'France', image: '🇫🇷' },
-  es: { name: 'Spain', image: '🇪🇸' },
-  it: { name: 'Italy', image: '🇮🇹' },
-  ca: { name: 'Canada', image: '🇨🇦' }
+  russia: { iso: { ru: 1 }, prefix: { '+7': 1 }, text_en: 'Russia', facebook: { activation: 1 }, telegram: { activation: 1 } },
+  ukraine: { iso: { ua: 1 }, prefix: { '+380': 1 }, text_en: 'Ukraine', facebook: { activation: 1 }, telegram: { activation: 1 } },
+  kazakhstan: { iso: { kz: 1 }, prefix: { '+7': 1 }, text_en: 'Kazakhstan', facebook: { activation: 1 }, telegram: { activation: 1 } },
+  usa: { iso: { us: 1 }, prefix: { '+1': 1 }, text_en: 'United States', facebook: { activation: 1 }, telegram: { activation: 1 } },
+  britain: { iso: { gb: 1 }, prefix: { '+44': 1 }, text_en: 'United Kingdom', facebook: { activation: 1 }, telegram: { activation: 1 } },
+  kenya: { iso: { ke: 1 }, prefix: { '+254': 1 }, text_en: 'Kenya', facebook: { activation: 1 }, telegram: { activation: 1 } },
+  nigeria: { iso: { ng: 1 }, prefix: { '+234': 1 }, text_en: 'Nigeria', facebook: { activation: 1 }, telegram: { activation: 1 } },
+  germany: { iso: { de: 1 }, prefix: { '+49': 1 }, text_en: 'Germany', facebook: { activation: 1 }, telegram: { activation: 1 } }
 };
 
-const mockServices = {
-  whatsapp: { name: 'WhatsApp', price: 1.99 },
-  telegram: { name: 'Telegram', price: 1.49 },
-  viber: { name: 'Viber', price: 1.29 },
-  facebook: { name: 'Facebook', price: 1.89 },
-  google: { name: 'Google', price: 1.59 },
-  instagram: { name: 'Instagram', price: 1.79 },
-  twitter: { name: 'Twitter', price: 1.39 },
-  tiktok: { name: 'TikTok', price: 1.69 }
+// Mock prices - 5sim API returns: {country: {product: {operator: {cost: x, count: y, rate: z}}}}
+const mockPrices = {
+  russia: {
+    facebook: { virtual1: { cost: 3.5, count: 100, rate: 99.5 }, mts: { cost: 3.8, count: 50 } },
+    telegram: { virtual1: { cost: 2.5, count: 200, rate: 99.9 }, mts: { cost: 2.8, count: 150 } }
+  },
+  kenya: {
+    facebook: { safaricom: { cost: 4.5, count: 80 }, airtel: { cost: 4.2, count: 60 } },
+    telegram: { safaricom: { cost: 3.5, count: 120 }, airtel: { cost: 3.2, count: 90 } }
+  }
 };
 
-const operators = ['MTS', 'Beeline', 'Megafon', 'Tele2', 'Safaricom', 'Airtel', 'MTN', 'Glo'];
-
-// Get countries
-// Helper to call 5sim API with protocol key and optional fallback to old key
+// Helper to call 5sim API with protocol key (no auth needed for /guest endpoints)
 const FIVESIM_BASE = process.env.FIVESIM_BASE_URL || 'https://api.5sim.net/v1';
-const PROTO_KEY = process.env.FIVESIM_PROTOCOL_KEY || null;
+const PROTO_KEY = process.env.FIVESIM_PROTOCOL_KEY || process.env.FIVESIM_KEY || process.env.FIVESIM_API_KEY || process.env['5SIM_API_KEY'] || null;
 const OLD_KEY = process.env.FIVESIM_OLD_KEY || null;
+
+console.log('🔑 5sim Configuration:', {
+  BASE_URL: FIVESIM_BASE,
+  PROTO_KEY: PROTO_KEY ? PROTO_KEY.slice(0, 10) + '...' : 'NOT SET',
+  OLD_KEY: OLD_KEY ? 'SET' : 'NOT SET'
+});
 
 async function call5sim(path, opts = {}) {
   const url = FIVESIM_BASE + path;
   const params = opts.params || {};
   const data = opts.data || undefined;
+  const requiresAuth = opts.requiresAuth !== false; // Default true for /user/* endpoints
 
   async function tryRequest(key) {
-    const headers = key ? { Authorization: `Bearer ${key}` } : {};
-    return axios({ url, method: opts.method || 'get', params, data, headers, timeout: 15000 });
+    const headers = { 'Accept': 'application/json' };
+    if (requiresAuth && key) {
+      headers['Authorization'] = `Bearer ${key}`;
+    }
+    console.log(`📡 5sim: ${opts.method || 'GET'} ${url}`, { requiresAuth, keyPresent: !!key });
+    return axios({
+      url,
+      method: opts.method || 'get',
+      params,
+      data,
+      headers,
+      timeout: 15000
+    });
   }
 
-  // Try protocol key first, then fallback to old key, otherwise throw
+  // For public endpoints, don't require auth
+  if (!requiresAuth) {
+    try {
+      return await tryRequest(null);
+    } catch (err) {
+      console.error('❌ 5sim error:', err.response?.status, err.response?.data?.error || err.message);
+      throw err;
+    }
+  }
+
+  // For protected endpoints, try with keys
   if (PROTO_KEY) {
     try {
       return await tryRequest(PROTO_KEY);
     } catch (err) {
-      // If auth error and we have an OLD_KEY, try fallback
       if (OLD_KEY && err.response && [401, 403].includes(err.response.status)) {
+        console.warn('⚠️ Auth error, trying fallback key...');
         return await tryRequest(OLD_KEY);
       }
+      console.error('❌ 5sim error:', err.response?.status, err.response?.data || err.message);
       throw err;
     }
   }
@@ -82,7 +103,8 @@ async function call5sim(path, opts = {}) {
     return await tryRequest(OLD_KEY);
   }
 
-  // No keys configured
+  // No keys for protected endpoint
+  console.warn('⚠️ No 5sim API key configured for protected endpoint');
   const e = new Error('No 5sim API key configured');
   e.code = 'NO_KEY';
   throw e;
@@ -90,107 +112,136 @@ async function call5sim(path, opts = {}) {
 
 app.get('/api/5sim/countries', async (req, res) => {
   try {
-    const resp = await call5sim('/countries');
-    // Some 5sim responses are objects keyed by country code; forward as-is
+    // 5sim endpoint: GET /v1/guest/countries (public, no auth)
+    const resp = await call5sim('/guest/countries', { requiresAuth: false });
+    console.log('✅ 5sim countries loaded successfully');
     return res.json(resp.data);
   } catch (err) {
-    // Fallback to mock
-    console.warn('5sim countries fetch failed, using mock:', err.message || err);
+    console.warn('⚠️ 5sim countries fetch failed, using mock:', err.message);
     return res.json(mockCountries);
   }
 });
 
-// Expose key presence (safe): do NOT return actual keys. Used by frontend to explain key capabilities.
 app.get('/api/5sim/key-status', (req, res) => {
+  res.json({
+    protocolConfigured: !!PROTO_KEY,
+    oldConfigured: !!OLD_KEY,
+    note: 'Keys are not exposed. This endpoint only reports whether keys are configured.'
+  });
+});
+
+// Get prices/services for a country and optionally by product
+// 5sim endpoint: GET /v1/guest/prices?country=$country or ?country=$country&product=$product (public, no auth)
+app.get('/api/5sim/services', async (req, res) => {
+  const { country, product } = req.query;
+
+  if (!country) {
+    return res.status(400).json({ error: 'country parameter required' });
+  }
+
+  console.log(`📱 5sim prices request: country=${country}, product=${product}`);
+
   try {
+    const params = { country };
+    if (product) params.product = product;
+
+    const resp = await call5sim('/guest/prices', { params, requiresAuth: false });
+    console.log(`✅ 5sim prices response received`);
+
+    // 5sim returns: {country: {product: {operator: {cost, count, rate}}}}
+    // Extract and format for frontend
+    const data = resp.data || {};
+    const countryData = data[country] || {};
+
     return res.json({
-      protocolConfigured: !!PROTO_KEY,
-      oldConfigured: !!OLD_KEY,
-      note: 'Keys are not exposed. This endpoint only reports whether keys are configured on the server.'
+      country,
+      products: countryData,
+      operators: Object.keys(countryData[product] || {})
     });
   } catch (err) {
-    return res.status(500).json({ error: 'Could not determine key status' });
+    console.warn(`⚠️ 5sim prices failed (${country}), using mock:`, err.message);
+    const mockData = mockPrices[country] || {};
+    return res.json({
+      country,
+      products: mockData,
+      operators: Object.keys(mockData[product] || {})
+    });
   }
 });
 
-// Get services for a country
-app.get('/api/5sim/services', async (req, res) => {
-  const { country } = req.query;
-  try {
-    const resp = await call5sim('/services', { params: { country } });
-    return res.json(resp.data);
-  } catch (err) {
-    console.warn('5sim services fetch failed, using mock:', err.message || err);
-    return res.json({ services: Object.values(mockServices), operators, prices: mockServices });
-  }
-});
-
-// Buy a number
+// Buy a number (requires authentication)
+// 5sim endpoint: GET /v1/user/buy/activation/$country/$operator/$product
 app.post('/api/5sim/buy', async (req, res) => {
-  const { country, service, operator } = req.body || {};
-  try {
-    // Attempt to call 5sim buy endpoint. The exact path may vary by 5sim API version; try common endpoints.
-    // First try a POST to /buy
-    try {
-      const resp = await call5sim('/buy', { method: 'post', data: { country, service, operator } });
-      return res.json(resp.data);
-    } catch (e) {
-      // If POST /buy not supported, try legacy /orders or fallback to mock
-      if (e.response && e.response.status >= 400 && e.response.status < 600) {
-        // fallthrough to mock
-      } else {
-        throw e;
-      }
-    }
-    // Fallback: return mock buy
-    const phoneNumber = `+${Math.floor(Math.random() * 10000000000)}`.substring(0, 13);
-    return res.json({ success: true, phoneNumber, id: Date.now().toString(), operator: operator || 'Any', price: mockServices[service]?.price || 1.99 });
-  } catch (err) {
-    console.error('5sim buy error:', err.message || err);
-    return res.status(502).json({ error: '5sim buy failed' });
-  }
-});
+  const { country, operator, product } = req.body;
 
-// Also support GET /api/5sim/buy for callers that use query params
-app.get('/api/5sim/buy', async (req, res) => {
-  const { country, service, operator } = req.query || {};
-  try {
-    // Try proxying to 5sim POST buy using query params
-    try {
-      const resp = await call5sim('/buy', { method: 'post', data: { country, service, operator } });
-      return res.json(resp.data);
-    } catch (e) {
-      // fallback to mock
-      const phoneNumber = `+${Math.floor(Math.random() * 10000000000)}`.substring(0, 13);
-      return res.json({ success: true, phoneNumber, id: Date.now().toString(), operator: operator || 'Any', price: mockServices[service]?.price || 1.99 });
-    }
-  } catch (err) {
-    console.error('5sim buy (GET) error:', err.message || err);
-    return res.status(502).json({ error: '5sim buy failed' });
+  if (!country || !operator || !product) {
+    return res.status(400).json({ error: 'country, operator, and product are required' });
   }
-});
 
-// Check SMS
-app.get('/api/5sim/check-sms/:id', async (req, res) => {
-  const { id } = req.params;
+  console.log(`💳 5sim buy request: ${country}/${operator}/${product}`);
+
   try {
-    const resp = await call5sim(`/check/${id}`);
+    // Use GET with path params (as per 5sim docs)
+    const path = `/user/buy/activation/${country}/${operator}/${product}`;
+    const resp = await call5sim(path, { requiresAuth: true });
+
+    console.log(`✅ 5sim buy successful: ${resp.data.id}`);
     return res.json(resp.data);
   } catch (err) {
-    console.warn('5sim check-sms failed, using mock:', err.message || err);
-    return res.json({ success: true, messages: [{ date: new Date(), text: 'Your verification code is: 123456' }] });
+    console.error('❌ 5sim buy error:', err.response?.status, err.response?.data?.error || err.message);
+
+    // Return mock on error
+    return res.json({
+      id: Math.floor(Math.random() * 100000000),
+      phone: `+${country}${Math.floor(Math.random() * 1000000000)}`.substring(0, 15),
+      operator,
+      product,
+      price: 3.5,
+      status: 'PENDING',
+      created_at: new Date().toISOString(),
+      expires: new Date(Date.now() + 15 * 60000).toISOString(),
+      sms: null
+    });
   }
 });
 
-// Also support /api/5sim/check/:id to match frontend
+// Check order / Get SMS (requires authentication)
+// 5sim endpoint: GET /v1/user/check/$id
 app.get('/api/5sim/check/:id', async (req, res) => {
   const { id } = req.params;
+
+  console.log(`📨 5sim check order: ${id}`);
+
   try {
-    const resp = await call5sim(`/check/${id}`);
+    const resp = await call5sim(`/user/check/${id}`, { requiresAuth: true });
+    console.log(`✅ 5sim check response: ${resp.data.status} with ${(resp.data.sms || []).length} SMS`);
     return res.json(resp.data);
   } catch (err) {
-    console.warn('5sim check failed, using mock:', err.message || err);
-    return res.json({ success: true, messages: [{ date: new Date(), text: 'Your verification code is: 123456' }] });
+    console.warn(`⚠️ 5sim check failed (${id}):`, err.message);
+
+    // Return mock
+    return res.json({
+      id: parseInt(id),
+      phone: '+1234567890',
+      product: 'facebook',
+      price: 3.5,
+      status: 'PENDING',
+      sms: [],
+      created_at: new Date().toISOString()
+    });
+  }
+});
+
+// Alternative endpoint for checking SMS (some frontends may use this)
+app.get('/api/5sim/check-sms/:id', async (req, res) => {
+  const { id } = req.params;
+  // Redirect to check endpoint
+  try {
+    const resp = await call5sim(`/user/check/${id}`, { requiresAuth: true });
+    return res.json({ sms: resp.data.sms || [], status: resp.data.status });
+  } catch (err) {
+    console.warn(`⚠️ 5sim check-sms failed (${id}):`, err.message);
+    return res.json({ sms: [], status: 'PENDING' });
   }
 });
 
@@ -235,9 +286,15 @@ app.get('/health', (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`🚀 Backend server running at http://localhost:${PORT}`);
-  console.log(`📡 API endpoints:`);
-  console.log(`   - GET  http://localhost:${PORT}/api/5sim/countries`);
-  console.log(`   - GET  http://localhost:${PORT}/api/5sim/services?country=ke`);
-  console.log(`   - POST http://localhost:${PORT}/api/5sim/buy`);
-  console.log(`   - GET  http://localhost:${PORT}/paystack-public-key`);
+  console.log(`📡 5sim API Endpoints (Proxy to https://api.5sim.net/v1):`);
+  console.log(`   - GET  /api/5sim/key-status (Check if 5sim API key is configured)`);
+  console.log(`   - GET  /api/5sim/countries (Fetch available countries) [PUBLIC]`);
+  console.log(`   - GET  /api/5sim/services?country=russia (Fetch products/prices) [PUBLIC]`);
+  console.log(`   - POST /api/5sim/buy (Buy activation number) [REQUIRES AUTH]`);
+  console.log(`   - GET  /api/5sim/check/:id (Check order status) [REQUIRES AUTH]`);
+  console.log(`💳 Paystack:`);
+  console.log(`   - GET  /paystack-public-key (Get Paystack public key)`);
+  console.log(`   - GET  /paystack/verify/:reference (Verify payment)`);
+  console.log(`💚 Health:`);
+  console.log(`   - GET  /health (Health check)`);
 });
