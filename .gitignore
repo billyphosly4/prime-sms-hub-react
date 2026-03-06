@@ -11,6 +11,9 @@ src/.env
 node_modules/
 /backend/node_modules/
 
+serviceAccountKey.json
+backend/serviceAccountKey.json
+
 # Build outputs
 dist/
 build/
