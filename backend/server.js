@@ -9,9 +9,23 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// Enable CORS for your frontend
+// Dynamic CORS for development & production
+const allowedOrigins = [
+  'http://localhost:5173',        // Vite dev
+  'http://localhost:3000',        // React dev
+  'http://127.0.0.1:5173',
+  'http://127.0.0.1:3000',
+  ...(process.env.FRONTEND_URL ? [process.env.FRONTEND_URL] : [])  // Vercel frontend
+];
+
 app.use(cors({
-  origin: ['http://localhost:5173', 'http://localhost:3000'],
+  origin: (origin, callback) => {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
   credentials: true
 }));
 
@@ -43,7 +57,7 @@ const mockPrices = {
 };
 
 // Helper to call 5sim API with protocol key (no auth needed for /guest endpoints)
-const FIVESIM_BASE = process.env.FIVESIM_BASE_URL || 'https://api.5sim.net/v1';
+const FIVESIM_BASE = process.env.FIVESIM_BASE_URL || 'https://5sim.net/v1';
 const PROTO_KEY = process.env.FIVESIM_PROTOCOL_KEY || process.env.FIVESIM_KEY || process.env.FIVESIM_API_KEY || process.env['5SIM_API_KEY'] || null;
 const OLD_KEY = process.env.FIVESIM_OLD_KEY || null;
 
@@ -245,6 +259,164 @@ app.get('/api/5sim/check-sms/:id', async (req, res) => {
   }
 });
 
+// ==================== SEARCH ENDPOINTS ====================
+// Search countries by name/code
+app.get('/api/5sim/search/countries', async (req, res) => {
+  const { q } = req.query;
+
+  try {
+    const resp = await call5sim('/guest/countries', { requiresAuth: false });
+    let countries = resp.data || mockCountries;
+
+    if (q) {
+      const query = q.toLowerCase();
+      const filtered = {};
+
+      for (const [code, data] of Object.entries(countries)) {
+        const text = (data.text_en || '').toLowerCase();
+        const prefix = Object.keys(data.prefix || {})[0] || '';
+
+        if (
+          code.toLowerCase().includes(query) ||
+          text.includes(query) ||
+          prefix.includes(query)
+        ) {
+          filtered[code] = data;
+        }
+      }
+
+      console.log(`🔍 Search countries: "${q}" → ${Object.keys(filtered).length} results`);
+      return res.json(filtered);
+    }
+
+    return res.json(countries);
+  } catch (err) {
+    console.warn('⚠️ Country search failed:', err.message);
+    
+    if (q) {
+      const query = q.toLowerCase();
+      const filtered = {};
+
+      for (const [code, data] of Object.entries(mockCountries)) {
+        const text = (data.text_en || '').toLowerCase();
+        if (code.toLowerCase().includes(query) || text.includes(query)) {
+          filtered[code] = data;
+        }
+      }
+
+      return res.json(filtered);
+    }
+
+    return res.json(mockCountries);
+  }
+});
+
+// Search services/prices with filters
+app.get('/api/5sim/search/services', async (req, res) => {
+  const { country, product, operator, minPrice, maxPrice, minCount, sortBy } = req.query;
+
+  if (!country) {
+    return res.status(400).json({ error: 'country parameter required' });
+  }
+
+  try {
+    const params = { country };
+    const resp = await call5sim('/guest/prices', { params, requiresAuth: false });
+
+    const countryData = resp.data?.[country] || mockPrices[country] || {};
+    const results = [];
+
+    // Iterate through products
+    for (const [prod, operators] of Object.entries(countryData)) {
+      // Filter by product if specified
+      if (product && prod.toLowerCase() !== product.toLowerCase()) {
+        continue;
+      }
+
+      // Iterate through operators
+      for (const [op, data] of Object.entries(operators)) {
+        // Filter by operator if specified
+        if (operator && op.toLowerCase() !== operator.toLowerCase()) {
+          continue;
+        }
+
+        const cost = parseFloat(data.cost);
+        const count = parseInt(data.count) || 0;
+
+        // Filter by price range
+        if (minPrice && cost < parseFloat(minPrice)) continue;
+        if (maxPrice && cost > parseFloat(maxPrice)) continue;
+
+        // Filter by count
+        if (minCount && count < parseInt(minCount)) continue;
+
+        results.push({
+          product: prod,
+          operator: op,
+          cost,
+          count,
+          rate: data.rate || null
+        });
+      }
+    }
+
+    // Sort results
+    if (sortBy === 'price-asc') {
+      results.sort((a, b) => a.cost - b.cost);
+    } else if (sortBy === 'price-desc') {
+      results.sort((a, b) => b.cost - a.cost);
+    } else if (sortBy === 'count-asc') {
+      results.sort((a, b) => a.count - b.count);
+    } else if (sortBy === 'count-desc') {
+      results.sort((a, b) => b.count - a.count);
+    }
+
+    console.log(`🔍 Search services: ${country}${product ? '/' + product : ''}${operator ? '/' + operator : ''} → ${results.length} results`);
+    return res.json({
+      country,
+      filters: { product, operator, minPrice, maxPrice, minCount },
+      results,
+      count: results.length
+    });
+  } catch (err) {
+    console.warn('⚠️ Services search failed:', err.message);
+
+    // Fallback with mock data
+    const countryData = mockPrices[country] || {};
+    const results = [];
+
+    for (const [prod, operators] of Object.entries(countryData)) {
+      if (product && prod.toLowerCase() !== product.toLowerCase()) continue;
+
+      for (const [op, data] of Object.entries(operators)) {
+        if (operator && op.toLowerCase() !== operator.toLowerCase()) continue;
+
+        const cost = parseFloat(data.cost);
+        const count = parseInt(data.count) || 0;
+
+        if (minPrice && cost < parseFloat(minPrice)) continue;
+        if (maxPrice && cost > parseFloat(maxPrice)) continue;
+        if (minCount && count < parseInt(minCount)) continue;
+
+        results.push({
+          product: prod,
+          operator: op,
+          cost,
+          count,
+          rate: data.rate || null
+        });
+      }
+    }
+
+    return res.json({
+      country,
+      filters: { product, operator, minPrice, maxPrice, minCount },
+      results,
+      count: results.length
+    });
+  }
+});
+
 // ==================== PAYSTACK MOCK API ====================
 app.get('/paystack-public-key', (req, res) => {
   res.json({
@@ -286,13 +458,16 @@ app.get('/health', (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`🚀 Backend server running at http://localhost:${PORT}`);
-  console.log(`📡 5sim API Endpoints (Proxy to https://api.5sim.net/v1):`);
+  console.log(`📡 5sim API Endpoints (Proxy to https://5sim.net/v1):`);
   console.log(`   - GET  /api/5sim/key-status (Check if 5sim API key is configured)`);
   console.log(`   - GET  /api/5sim/countries (Fetch available countries) [PUBLIC]`);
   console.log(`   - GET  /api/5sim/services?country=russia (Fetch products/prices) [PUBLIC]`);
   console.log(`   - POST /api/5sim/buy (Buy activation number) [REQUIRES AUTH]`);
   console.log(`   - GET  /api/5sim/check/:id (Check order status) [REQUIRES AUTH]`);
-  console.log(`💳 Paystack:`);
+  console.log(`� Search Endpoints:`);
+  console.log(`   - GET  /api/5sim/search/countries?q=russia (Search countries by name/code) [PUBLIC]`);
+  console.log(`   - GET  /api/5sim/search/services?country=russia&product=facebook&maxPrice=5&sortBy=price-asc (Search services with filters) [PUBLIC]`);
+  console.log(`�💳 Paystack:`);
   console.log(`   - GET  /paystack-public-key (Get Paystack public key)`);
   console.log(`   - GET  /paystack/verify/:reference (Verify payment)`);
   console.log(`💚 Health:`);

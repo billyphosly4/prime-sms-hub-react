@@ -5,7 +5,7 @@ module.exports = async (req, res) => {
   if (!country) return res.status(400).json({ error: 'country parameter is required' });
 
   try {
-    const url = `https://api.5sim.net/v1/guest/prices?country=${encodeURIComponent(country)}`;
+    const url = `https://5sim.net/v1/guest/prices?country=${encodeURIComponent(country)}`;
     const resp = await axios.get(url, { headers: { Accept: 'application/json' }, timeout: 10000 });
     return res.status(200).json(resp.data);
   } catch (err) {

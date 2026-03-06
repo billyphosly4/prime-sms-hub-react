@@ -2,7 +2,7 @@ const axios = require('axios');
 
 module.exports = async (req, res) => {
   try {
-    const url = 'https://api.5sim.net/v1/guest/countries';
+    const url = 'https://5sim.net/v1/guest/countries';
     const resp = await axios.get(url, { headers: { Accept: 'application/json' }, timeout: 10000 });
     return res.status(200).json(resp.data);
   } catch (err) {

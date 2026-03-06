@@ -16,7 +16,7 @@ const PAYSTACK_PUBLIC_KEY = import.meta.env.VITE_PAYSTACK_PUBLIC_KEY || 'pk_live
 const TELEGRAM_BOT_TOKEN = import.meta.env.VITE_TELEGRAM_BOT_TOKEN;
 // When deployed to Vercel, set VITE_BACKEND_URL to your site domain if you want to call an external backend.
 // If VITE_BACKEND_URL is empty, frontend will call relative `/api/*` endpoints (recommended for Vercel serverless functions).
-const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || '';
+const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'https://backend-0r0k.onrender.com';
 const APP_NAME = import.meta.env.VITE_APP_NAME || 'PrimeSmsHub';
 
 // Exchange rate (1 KES = 0.01 USD)
