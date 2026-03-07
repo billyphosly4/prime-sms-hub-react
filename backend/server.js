@@ -15,7 +15,8 @@ const allowedOrigins = [
   'http://localhost:3000',        // React dev
   'http://127.0.0.1:5173',
   'http://127.0.0.1:3000',
-  ...(process.env.FRONTEND_URL ? [process.env.FRONTEND_URL] : [])  // Vercel frontend
+  'https://prime-sms-hub-react.vercel.app',  // Vercel production
+  ...(process.env.FRONTEND_URL ? [process.env.FRONTEND_URL] : [])  // Vercel frontend from env
 ];
 
 app.use(cors({
@@ -85,7 +86,7 @@ async function call5sim(path, opts = {}) {
       params,
       data,
       headers,
-      timeout: 15000
+      timeout: 5000  // Reduced from 15000 to fail faster and use fallback
     });
   }
 
@@ -134,6 +135,12 @@ app.get('/api/5sim/countries', async (req, res) => {
     console.warn('⚠️ 5sim countries fetch failed, using mock:', err.message);
     return res.json(mockCountries);
   }
+});
+
+// Fast mock endpoint - always returns mock data instantly (no 5sim call)
+app.get('/api/mock/countries', (req, res) => {
+  console.log('📦 Returning mock countries (instant, no 5sim call)');
+  return res.json(mockCountries);
 });
 
 app.get('/api/5sim/key-status', (req, res) => {
@@ -204,17 +211,10 @@ app.post('/api/5sim/buy', async (req, res) => {
   } catch (err) {
     console.error('❌ 5sim buy error:', err.response?.status, err.response?.data?.error || err.message);
 
-    // Return mock on error
-    return res.json({
-      id: Math.floor(Math.random() * 100000000),
-      phone: `+${country}${Math.floor(Math.random() * 1000000000)}`.substring(0, 15),
-      operator,
-      product,
-      price: 3.5,
-      status: 'PENDING',
-      created_at: new Date().toISOString(),
-      expires: new Date(Date.now() + 15 * 60000).toISOString(),
-      sms: null
+    // Return actual error instead of mock - let frontend know the purchase failed
+    return res.status(err.response?.status || 500).json({
+      error: err.response?.data?.error || 'Failed to purchase number from 5sim. Please check API credentials and try again.',
+      details: err.message
     });
   }
 });

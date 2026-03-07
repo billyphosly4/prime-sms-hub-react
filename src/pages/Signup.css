@@ -76,6 +76,19 @@
   transition: all 0.3s;
 }
 
+.form-group input.input-error {
+  border-color: #e74c3c;
+  background-color: #fef5f5;
+}
+
+.field-error {
+  display: block;
+  margin-top: 5px;
+  color: #e74c3c;
+  font-size: 13px;
+  font-weight: 500;
+}
+
 .form-group input:focus {
   outline: none;
   border-color: #667eea;

@@ -14,29 +14,40 @@ export default function Signup({ onNavigate }) {
     confirmPassword: '',
     phone: ''
   });
-  const [error, setError] = useState('');
+  const [fieldErrors, setFieldErrors] = useState({});
   const [loading, setLoading] = useState(false);
 
   const handleChange = (e) => {
+    const { name, value } = e.target;
     setFormData({
       ...formData,
-      [e.target.name]: e.target.value
+      [name]: value
     });
+    // Clear error for this field when user starts typing
+    if (fieldErrors[name]) {
+      setFieldErrors({
+        ...fieldErrors,
+        [name]: ''
+      });
+    }
   };
 
   const handleSignup = async (e) => {
     e.preventDefault();
-    setError('');
+    setFieldErrors({});
     setLoading(true);
 
-    if (formData.password !== formData.confirmPassword) {
-      setError('Passwords do not match');
-      setLoading(false);
-      return;
-    }
+    // Validation
+    const errors = {};
+    if (!formData.fullName.trim()) errors.fullName = 'Full name is required';
+    if (!formData.email.trim()) errors.email = 'Email is required';
+    if (!formData.password) errors.password = 'Password is required';
+    if (formData.password.length < 6) errors.password = 'Password must be at least 6 characters';
+    if (!formData.confirmPassword) errors.confirmPassword = 'Please confirm your password';
+    if (formData.password !== formData.confirmPassword) errors.confirmPassword = 'Passwords do not match';
 
-    if (formData.password.length < 6) {
-      setError('Password must be at least 6 characters');
+    if (Object.keys(errors).length > 0) {
+      setFieldErrors(errors);
       setLoading(false);
       return;
     }
@@ -75,15 +86,16 @@ export default function Signup({ onNavigate }) {
       
       switch (err.code) {
         case 'auth/email-already-in-use':
-          setError('Email already in use. Please login instead.');
+          setFieldErrors({ email: 'Email already in use. Please login instead.' });
           break;
         case 'auth/invalid-email':
-          setError('Invalid email address');
+          setFieldErrors({ email: 'Invalid email address' });
           break;
         case 'auth/weak-password':
-          setError('Password is too weak');
+          setFieldErrors({ password: 'Password is too weak' });
           break;
-        
+        default:
+          setFieldErrors({ form: err.message || 'Signup failed. Please try again.' });
       }
     } finally {
       setLoading(false);
@@ -101,9 +113,9 @@ export default function Signup({ onNavigate }) {
             <p>Join PrimeSmsHub today</p>
           </div>
 
-          {error && (
+          {fieldErrors.form && (
             <div className="error-message">
-              ⚠️ {error}
+              ⚠️ {fieldErrors.form}
             </div>
           )}
 
@@ -118,7 +130,11 @@ export default function Signup({ onNavigate }) {
                 onChange={handleChange}
                 required
                 disabled={loading}
+                className={fieldErrors.fullName ? 'input-error' : ''}
               />
+              {fieldErrors.fullName && (
+                <span className="field-error">❌ {fieldErrors.fullName}</span>
+              )}
             </div>
 
             <div className="form-group">
@@ -131,7 +147,11 @@ export default function Signup({ onNavigate }) {
                 onChange={handleChange}
                 required
                 disabled={loading}
+                className={fieldErrors.email ? 'input-error' : ''}
               />
+              {fieldErrors.email && (
+                <span className="field-error">❌ {fieldErrors.email}</span>
+              )}
             </div>
 
             <div className="form-group">
@@ -157,8 +177,14 @@ export default function Signup({ onNavigate }) {
                 required
                 disabled={loading}
                 minLength="6"
+                className={fieldErrors.password ? 'input-error' : ''}
               />
-              <small>Must be at least 6 characters</small>
+              {fieldErrors.password && (
+                <span className="field-error">❌ {fieldErrors.password}</span>
+              )}
+              {!fieldErrors.password && (
+                <small>Must be at least 6 characters</small>
+              )}
             </div>
 
             <div className="form-group">
@@ -171,7 +197,11 @@ export default function Signup({ onNavigate }) {
                 onChange={handleChange}
                 required
                 disabled={loading}
+                className={fieldErrors.confirmPassword ? 'input-error' : ''}
               />
+              {fieldErrors.confirmPassword && (
+                <span className="field-error">❌ {fieldErrors.confirmPassword}</span>
+              )}
             </div>
 
             <div className="form-checkbox">

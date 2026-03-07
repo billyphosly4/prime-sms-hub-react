@@ -47,7 +47,7 @@ export default function Navbar({ onNavigate, user = null }) {
           <img src="/hero.png" alt="PrimeSmsHub" />
           <div>
             <strong>PrimeSmsHub</strong>
-            <div style={{ fontSize: '12px', color: '#667781' }}>
+            <div style={{ fontSize: '12px', color: '#e0e7ff' }}>
               Virtual numbers & SMS verification
             </div>
           </div>

@@ -1,6 +1,5 @@
 // dashboard.jsx
 import React, { useState, useEffect } from 'react';
-import Navbar from '/src/components/Navbar';
 import { auth, db } from '../firebasejs/config';
 import { signOut } from 'firebase/auth';
 import {
@@ -47,6 +46,8 @@ const Dashboard = ({ onNavigate, user }) => {
   const [countries, setCountries] = useState([]);
   const [selectedCountry, setSelectedCountry] = useState('');
   const [selectedCountryData, setSelectedCountryData] = useState(null);
+  const [countrySearch, setCountrySearch] = useState('');
+  const [showCountryDropdown, setShowCountryDropdown] = useState(false);
   
   // Service selection state
   const [services, setServices] = useState([]);
@@ -54,6 +55,8 @@ const Dashboard = ({ onNavigate, user }) => {
   const [operators, setOperators] = useState([]);
   const [selectedOperator, setSelectedOperator] = useState('');
   const [servicePrices, setServicePrices] = useState({});
+  const [serviceSearch, setServiceSearch] = useState('');
+  const [showServiceDropdown, setShowServiceDropdown] = useState(false);
   
   // SMS states
   const [smsMessages, setSmsMessages] = useState([]);
@@ -81,7 +84,7 @@ const Dashboard = ({ onNavigate, user }) => {
   // ==================== HELPER FUNCTIONS ====================
   useEffect(() => {
     const onResize = () => {
-      const desktop = window.innerWidth >= 768;
+      const desktop = window.innerWidth >= 1024;
       setIsDesktop(desktop);
       // Open sidebar on desktop for a persistent navigation drawer, close on mobile
       setSidebarOpen(desktop);
@@ -533,7 +536,7 @@ const Dashboard = ({ onNavigate, user }) => {
       console.log('🌍 Loading 5sim countries from:', url);
       
       const response = await axios.get(url, {
-        timeout: 10000,
+        timeout: 8000,
         headers: { 'Accept': 'application/json' }
       });
       
@@ -706,29 +709,28 @@ const Dashboard = ({ onNavigate, user }) => {
       
       // Buy from 5sim using correct API format
       console.log(`💳 Buying: country=${selectedCountry}, operator=${selectedOperator}, product=${selectedService.id}`);
-      try {
-        const response = await axios.post(`${BACKEND_URL}/api/5sim/buy`, {
-          country: selectedCountry,
-          operator: selectedOperator.toLowerCase() || 'any',
-          product: selectedService.id
-        }, {
-          timeout: 15000,
-          headers: { 'Accept': 'application/json' }
-        });
-        
-        if (response.data && response.data.phone) {
-          phoneNumber = response.data.phone;
-          orderId = response.data.id;
-          console.log(`✅ 5sim purchase successful: ${orderId} - ${phoneNumber}`);
-        } else {
-          console.warn('⚠️ 5sim response missing phone/id:', response.data);
-          throw new Error('Invalid response from 5sim');
-        }
-      } catch (apiError) {
-        console.error(`❌ 5sim API error:`, apiError.response?.data || apiError.message);
-        phoneNumber = `+${Math.floor(Math.random() * 10000000000)}`.substring(0, 13);
-        orderId = 'mock_' + Date.now();
-        console.log(`⚠️ Using mock data: ${orderId} - ${phoneNumber}`);
+      
+      const response = await axios.post(`${BACKEND_URL}/api/5sim/buy`, {
+        country: selectedCountry,
+        operator: selectedOperator.toLowerCase() || 'any',
+        product: selectedService.id
+      }, {
+        timeout: 15000,
+        headers: { 'Accept': 'application/json' }
+      });
+      
+      if (response.data.error) {
+        console.error(`❌ 5sim API error:`, response.data.error);
+        throw new Error(response.data.error);
+      }
+      
+      if (response.data && response.data.phone) {
+        phoneNumber = response.data.phone;
+        orderId = response.data.id;
+        console.log(`✅ 5sim purchase successful: ${orderId} - ${phoneNumber}`);
+      } else {
+        console.warn('⚠️ 5sim response missing phone/id:', response.data);
+        throw new Error('Invalid response from 5sim API');
       }
       
       // Resolve uid (use prop `user` as fallback) and get current wallet from Firestore
@@ -805,7 +807,8 @@ const Dashboard = ({ onNavigate, user }) => {
       
     } catch (error) {
       console.error('Purchase error:', error);
-      alert('Error processing purchase');
+      const errorMsg = error.response?.data?.error || error.message || 'Error processing purchase';
+      alert(`❌ Purchase failed: ${errorMsg}\n\nNo money was deducted. Please try again.`);
     } finally {
       setLoading(false);
     }
@@ -1205,17 +1208,59 @@ const Dashboard = ({ onNavigate, user }) => {
         {loading ? (
           <div className="dashboard-loading">Loading countries...</div>
         ) : (
-          <div className="dashboard-countries-grid">
-            {countries.map(country => (
-              <div 
-                key={country.code} 
-                className="dashboard-country-card"
-                onClick={() => handleCountrySelect(country)}
-              >
-                <span className="dashboard-country-flag">{country.image}</span>
-                <span className="dashboard-country-name">{country.name}</span>
+          <div className="country-select-container">
+            <div className="country-select-wrapper">
+              <input
+                type="text"
+                className="country-select-input"
+                placeholder="Search countries..."
+                value={countrySearch}
+                onChange={(e) => setCountrySearch(e.target.value)}
+                onFocus={() => setShowCountryDropdown(true)}
+                onBlur={() => setTimeout(() => setShowCountryDropdown(false), 200)}
+              />
+              <span className="country-select-arrow">▼</span>
+              
+              {showCountryDropdown && (
+                <div className="country-dropdown-list">
+                  {countries
+                    .filter(country =>
+                      country.name.toLowerCase().includes(countrySearch.toLowerCase()) ||
+                      country.code.toLowerCase().includes(countrySearch.toLowerCase())
+                    )
+                    .map(country => (
+                      <div
+                        key={country.code}
+                        className={`country-dropdown-item ${selectedCountry === country.code ? 'active' : ''}`}
+                        onClick={() => {
+                          handleCountrySelect(country);
+                          setCountrySearch('');
+                          setShowCountryDropdown(false);
+                        }}
+                      >
+                        <span className="dropdown-item-flag">{country.image}</span>
+                        <span className="dropdown-item-text">
+                          <strong>{country.name}</strong>
+                          <small>{country.prefix}</small>
+                        </span>
+                      </div>
+                    ))}
+                  {countries.filter(country =>
+                    country.name.toLowerCase().includes(countrySearch.toLowerCase()) ||
+                    country.code.toLowerCase().includes(countrySearch.toLowerCase())
+                  ).length === 0 && (
+                    <div className="country-dropdown-item disabled">
+                      No countries found
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+            {selectedCountry && (
+              <div className="selected-country-badge">
+                {countries.find(c => c.code === selectedCountry)?.image} {selectedCountry.toUpperCase()}
               </div>
-            ))}
+            )}
           </div>
         )}
       </div>
@@ -1272,20 +1317,59 @@ const Dashboard = ({ onNavigate, user }) => {
           <div className="dashboard-loading">Loading services...</div>
         ) : (
           <>
-            <div className="dashboard-services-grid">
-              {services.map(service => (
-                <div 
-                  key={service.id || service} 
-                  className={`dashboard-service-card ${selectedService?.id === service.id ? 'selected' : ''}`}
-                  onClick={() => setSelectedService(service)}
-                >
-                  <h4>{service.name || service}</h4>
-                  <p className="dashboard-service-price">
-                    ${typeof service === 'object' ? service.price.toFixed(2) : (servicePrices[service] || '1.00')}
-                  </p>
-                  <button className="dashboard-select-service-btn">Select</button>
+            <div className="service-select-container">
+              <div className="service-select-wrapper">
+                <input
+                  type="text"
+                  className="service-select-input"
+                  placeholder="Search services (Facebook, Telegram, etc)..."
+                  value={serviceSearch}
+                  onChange={(e) => setServiceSearch(e.target.value)}
+                  onFocus={() => setShowServiceDropdown(true)}
+                  onBlur={() => setTimeout(() => setShowServiceDropdown(false), 200)}
+                />
+                <span className="service-select-arrow">▼</span>
+                
+                {showServiceDropdown && (
+                  <div className="service-dropdown-list">
+                    {services
+                      .filter(service =>
+                        (service.name || service).toLowerCase().includes(serviceSearch.toLowerCase())
+                      )
+                      .map((service, idx) => (
+                        <div
+                          key={service.id || idx}
+                          className={`service-dropdown-item ${selectedService?.id === service.id || selectedService === service ? 'active' : ''}`}
+                          onClick={() => {
+                            setSelectedService(service);
+                            setServiceSearch('');
+                            setShowServiceDropdown(false);
+                          }}
+                        >
+                          <div className="dropdown-service-info">
+                            <strong>{service.name || service}</strong>
+                            <span className="service-price">
+                              ${typeof service === 'object' ? service.price.toFixed(2) : (servicePrices[service] || '1.00')}
+                            </span>
+                          </div>
+                        </div>
+                      ))}
+                    {services.filter(service =>
+                      (service.name || service).toLowerCase().includes(serviceSearch.toLowerCase())
+                    ).length === 0 && (
+                      <div className="service-dropdown-item disabled">
+                        No services found
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+              {selectedService && (
+                <div className="selected-service-badge">
+                  {selectedService.name || selectedService}
+                  <span>${typeof selectedService === 'object' ? selectedService.price.toFixed(2) : (servicePrices[selectedService] || '1.00')}</span>
                 </div>
-              ))}
+              )}
             </div>
 
             {selectedService && (
@@ -1413,10 +1497,8 @@ const Dashboard = ({ onNavigate, user }) => {
 
   return (
     <div className="dashboard-page">
-      {/* Header: show custom Navbar on desktop, compact header on mobile */}
-      {isDesktop ? (
-        <Navbar onNavigate={dashboardNavigate} user={currentUser || user} />
-      ) : (
+      {/* Header: only show on mobile */}
+      {!isDesktop && (
         <div className="dashboard-header">
           <div className="dashboard-menu-icon" onClick={() => setSidebarOpen(true)}>☰</div>
           <div className="dashboard-logo">
@@ -1633,7 +1715,7 @@ const Dashboard = ({ onNavigate, user }) => {
                         <td>{formatDate(tx.createdAt)}</td>
                         <td>
                           <code style={{ fontSize: '12px', backgroundColor: '#f0f0f0', padding: '4px 8px', borderRadius: '4px' }}>
-                            {tx.txId?.slice(0, 12) || 'N/A'}
+                            {tx.txId ? String(tx.txId).slice(0, 12) : 'N/A'}
                           </code>
                         </td>
                         <td style={{ fontWeight: 'bold', color: tx.type === 'credit' ? '#28a745' : '#dc3545' }}>
