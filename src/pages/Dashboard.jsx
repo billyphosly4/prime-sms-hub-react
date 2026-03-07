@@ -16,7 +16,7 @@ const PAYSTACK_PUBLIC_KEY = import.meta.env.VITE_PAYSTACK_PUBLIC_KEY || 'pk_live
 const TELEGRAM_BOT_TOKEN = import.meta.env.VITE_TELEGRAM_BOT_TOKEN;
 // When deployed to Vercel, set VITE_BACKEND_URL to your site domain if you want to call an external backend.
 // If VITE_BACKEND_URL is empty, frontend will call relative `/api/*` endpoints (recommended for Vercel serverless functions).
-const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'https://backend-0r0k.onrender.com';
+const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'https://backend-uxkx.onrender.com';
 console.log('🔍 BACKEND_URL:', BACKEND_URL);
 const APP_NAME = import.meta.env.VITE_APP_NAME || 'PrimeSmsHub';
 
@@ -529,7 +529,7 @@ const Dashboard = ({ onNavigate, user }) => {
     setError(null);
     
     try {
-      const url = `${"https://backend-0r0k.onrender.com"}/api/5sim/countries`;
+      const url = `${BACKEND_URL}/api/5sim/countries`;
       console.log('🌍 Loading 5sim countries from:', url);
       
       const response = await axios.get(url, {
@@ -611,7 +611,7 @@ const Dashboard = ({ onNavigate, user }) => {
     console.log('📱 Loading 5sim prices for country:', countryCode, 'Backend:', BACKEND_URL);
     
     try {
-      const url = `${"https://backend-0r0k.onrender.com"}/api/5sim/services?country=${countryCode}`;
+      const url = `${BACKEND_URL}/api/5sim/services?country=${countryCode}`;
       console.log('🔗 Request URL:', url);
       
       const response = await axios.get(url, {
@@ -707,7 +707,7 @@ const Dashboard = ({ onNavigate, user }) => {
       // Buy from 5sim using correct API format
       console.log(`💳 Buying: country=${selectedCountry}, operator=${selectedOperator}, product=${selectedService.id}`);
       try {
-        const response = await axios.post(`${"https://backend-0r0k.onrender.com"}/api/5sim/buy`, {
+        const response = await axios.post(`${BACKEND_URL}/api/5sim/buy`, {
           country: selectedCountry,
           operator: selectedOperator.toLowerCase() || 'any',
           product: selectedService.id
@@ -821,8 +821,8 @@ const Dashboard = ({ onNavigate, user }) => {
       let verifiedAmount = amount;
       let verifiedCurrency = currency.toUpperCase();
       try {
-        console.log('🔄 Verifying with backend:', `${"https://backend-0r0k.onrender.com"}/paystack/verify/${txId}`);
-        const resp = await axios.get(`${"https://backend-0r0k.onrender.com"}/paystack/verify/${encodeURIComponent(txId)}`);
+        console.log('🔄 Verifying with backend:', `${BACKEND_URL}/paystack/verify/${txId}`);
+        const resp = await axios.get(`${BACKEND_URL}/paystack/verify/${encodeURIComponent(txId)}`);
         console.log('✅ Backend verification response:', resp.data);
         
         // If Paystack returned a standard response, normalize values
@@ -932,7 +932,7 @@ const Dashboard = ({ onNavigate, user }) => {
       
       if (orderId && !orderId.startsWith('mock_')) {
         try {
-          const response = await axios.get(`${"https://backend-0r0k.onrender.com"}/api/5sim/check/${orderId}`, {
+          const response = await axios.get(`${BACKEND_URL}/api/5sim/check/${orderId}`, {
             headers: { 'X-API-Key': FIVESIM_API_KEY },
             timeout: 10000
           });
