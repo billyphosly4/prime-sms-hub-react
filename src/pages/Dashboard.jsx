@@ -134,128 +134,144 @@ const Dashboard = ({ onNavigate, user }) => {
     console.log("🟢 Setting up real-time listeners for user:", activeUser.uid);
     setCurrentUser(activeUser);
     
-    // ===== 1. USER DOCUMENT LISTENER =====
-    const userRef = doc(db, 'users', activeUser.uid);
-    const unsubscribeUser = onSnapshot(userRef, (docSnap) => {
-      if (docSnap.exists()) {
-        const firestoreData = docSnap.data();
-        console.log("👤 User auto-updated - Wallet: $", firestoreData.wallet);
-        setUserData(prev => ({
-          ...prev,
-          ...firestoreData,
-          wallet: firestoreData.wallet || 0
-        }));
-      } else {
-        // Create user if doesn't exist
-        const newUser = {
-          email: user.email,
-          fullName: user.displayName || user.email?.split('@')[0] || 'User',
-          wallet: 0,
-          phone: '',
-          country: '',
-          createdAt: serverTimestamp(),
-          lastLogin: serverTimestamp()
-        };
-        // when activeUser is from auth.currentUser, use that object for fields
-        const emailVal = activeUser.email;
-        const displayNameVal = activeUser.displayName;
-        const prepared = {
-          ...newUser,
-          email: emailVal,
-          fullName: displayNameVal || emailVal?.split('@')[0] || 'User'
-        };
-        setDoc(userRef, prepared);
-        setUserData(prepared);
-      }
-    }, (error) => {
-      console.error("User listener error:", error);
-    });
+    const unsubscribers = [];
     
-    // ===== 2. TRANSACTIONS LISTENER =====
-    const transactionsQuery = query(
-      collection(db, 'transactions'),
-      where('uid', '==', activeUser.uid),
-      orderBy('createdAt', 'desc')
-      // Removed limit(20) to load all historical transactions for accurate reconciliation
-    );
-    
-    const unsubscribeTransactions = onSnapshot(transactionsQuery, (snapshot) => {
-      const txList = [];
-      snapshot.forEach(doc => {
-        const data = doc.data();
-        
-        let createdAt = new Date();
-        if (data.createdAt) {
-          if (typeof data.createdAt.toDate === 'function') {
-            createdAt = data.createdAt.toDate();
-          } else if (data.createdAt.seconds) {
-            createdAt = new Date(data.createdAt.seconds * 1000);
+    try {
+      // ===== 1. USER DOCUMENT LISTENER =====
+      const userRef = doc(db, 'users', activeUser.uid);
+      const unsubscribeUser = onSnapshot(userRef, (docSnap) => {
+        if (docSnap.exists()) {
+          const firestoreData = docSnap.data();
+          console.log("👤 User auto-updated - Wallet: $", firestoreData.wallet);
+          setUserData(prev => ({
+            ...prev,
+            ...firestoreData,
+            wallet: firestoreData.wallet || 0
+          }));
+        } else {
+          // Create user if doesn't exist
+          const newUser = {
+            email: user.email,
+            fullName: user.displayName || user.email?.split('@')[0] || 'User',
+            wallet: 0,
+            phone: '',
+            country: '',
+            createdAt: serverTimestamp(),
+            lastLogin: serverTimestamp()
+          };
+          // when activeUser is from auth.currentUser, use that object for fields
+          const emailVal = activeUser.email;
+          const displayNameVal = activeUser.displayName;
+          const prepared = {
+            ...newUser,
+            email: emailVal,
+            fullName: displayNameVal || emailVal?.split('@')[0] || 'User'
+          };
+          setDoc(userRef, prepared);
+          setUserData(prepared);
+        }
+      }, (error) => {
+        console.error("User listener error:", error);
+        setError('Firestore connection unavailable - using local data');
+      });
+      unsubscribers.push(unsubscribeUser);
+      
+      // ===== 2. TRANSACTIONS LISTENER =====
+      const transactionsQuery = query(
+        collection(db, 'transactions'),
+        where('uid', '==', activeUser.uid),
+        orderBy('createdAt', 'desc')
+        // Removed limit(20) to load all historical transactions for accurate reconciliation
+      );
+      
+      const unsubscribeTransactions = onSnapshot(transactionsQuery, (snapshot) => {
+        const txList = [];
+        snapshot.forEach(doc => {
+          const data = doc.data();
+          
+          let createdAt = new Date();
+          if (data.createdAt) {
+            if (typeof data.createdAt.toDate === 'function') {
+              createdAt = data.createdAt.toDate();
+            } else if (data.createdAt.seconds) {
+              createdAt = new Date(data.createdAt.seconds * 1000);
+            }
           }
-        }
-        
-        txList.push({
-          id: doc.id,
-          ...data,
-          createdAt: createdAt
-        });
-      });
-      console.log("📊 Transactions auto-updated:", txList.length);
-      setTransactions(txList);
-
-      // Ensure user's document contains these transaction ids (helps when server/webhook writes transactions)
-      (async () => {
-        try {
-          const uidForSync = user?.uid || currentUser?.uid;
-          if (!uidForSync) return;
-          const txIds = txList.map(t => t.id).filter(Boolean);
-          if (txIds.length === 0) return;
-          const userRefForSync = doc(db, 'users', uidForSync);
-          await updateDoc(userRefForSync, {
-            transactions: arrayUnion(...txIds)
+          
+          txList.push({
+            id: doc.id,
+            ...data,
+            createdAt: createdAt
           });
-        } catch (err) {
-          // non-fatal: log and continue
-          console.warn('Could not sync transactions into user doc:', err);
-        }
-      })();
-    }, (error) => {
-      console.error("Transactions listener error:", error);
-    });
-    
-    // ===== 3. ACTIVE NUMBERS LISTENER =====
-    const numbersQuery = query(
-      collection(db, 'activeNumbers'),
-      where('uid', '==', activeUser.uid),
-      orderBy('purchasedAt', 'desc')
-    );
-    
-    const unsubscribeNumbers = onSnapshot(numbersQuery, (snapshot) => {
-      const numbersList = [];
-      snapshot.forEach(doc => {
-        const data = doc.data();
-        numbersList.push({
-          id: doc.id,
-          ...data,
-          purchasedAt: data.purchasedAt?.toDate?.() || new Date(),
-          expiresAt: data.expiresAt?.toDate?.() || new Date()
         });
+        console.log("📊 Transactions auto-updated:", txList.length);
+        setTransactions(txList);
+
+        // Ensure user's document contains these transaction ids (helps when server/webhook writes transactions)
+        (async () => {
+          try {
+            const uidForSync = user?.uid || currentUser?.uid;
+            if (!uidForSync) return;
+            const txIds = txList.map(t => t.id).filter(Boolean);
+            if (txIds.length === 0) return;
+            const userRefForSync = doc(db, 'users', uidForSync);
+            await updateDoc(userRefForSync, {
+              transactions: arrayUnion(...txIds)
+            });
+          } catch (err) {
+            // non-fatal: log and continue
+            console.warn('Could not sync transactions into user doc:', err);
+          }
+        })();
+      }, (error) => {
+        console.error("Transactions listener error:", error);
+        setTransactions([]); // Use empty array as fallback
       });
-      console.log("📱 Active numbers auto-updated:", numbersList.length);
-      setActiveNumbers(numbersList);
-    }, (error) => {
-      console.error("Numbers listener error:", error);
-    });
+      unsubscribers.push(unsubscribeTransactions);
+      
+      // ===== 3. ACTIVE NUMBERS LISTENER =====
+      const numbersQuery = query(
+        collection(db, 'activeNumbers'),
+        where('uid', '==', activeUser.uid),
+        orderBy('purchasedAt', 'desc')
+      );
+      
+      const unsubscribeNumbers = onSnapshot(numbersQuery, (snapshot) => {
+        const numbersList = [];
+        snapshot.forEach(doc => {
+          const data = doc.data();
+          numbersList.push({
+            id: doc.id,
+            ...data,
+            purchasedAt: data.purchasedAt?.toDate?.() || new Date(),
+            expiresAt: data.expiresAt?.toDate?.() || new Date()
+          });
+        });
+        console.log("📱 Active numbers auto-updated:", numbersList.length);
+        setActiveNumbers(numbersList);
+      }, (error) => {
+        console.error("Numbers listener error:", error);
+        setActiveNumbers([]); // Use empty array as fallback
+      });
+      unsubscribers.push(unsubscribeNumbers);
+    } catch (err) {
+      console.error('⚠️ Firestore setup error (continuing with offline mode):', err);
+    }
     
-    // Load static data
+    // Load static data from backend (countries and services)
     loadCountries();
     checkTelegramLink(activeUser);
     
     // Cleanup listeners
     return () => {
       console.log("🔴 Cleaning up listeners");
-      unsubscribeUser();
-      unsubscribeTransactions();
-      unsubscribeNumbers();
+      unsubscribers.forEach(unsub => {
+        try {
+          unsub();
+        } catch (err) {
+          console.warn('Error cleaning up listener:', err);
+        }
+      });
     };
   }, [user]);
 
